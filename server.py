@@ -15,6 +15,7 @@ admin / admin. Sessions are an HttpOnly cookie holding a random token, kept in m
 the server signs everyone out. Only the Python standard library is used.
 """
 import argparse
+import collections
 import contextlib
 import getpass
 import hashlib
@@ -44,8 +45,10 @@ ITERATIONS = 310_000              # PBKDF2 rounds for new hashes; each record ke
 SESSION_IDLE = 12 * 3600          # a session ends after this long without use (seconds)
 MAX_ATTEMPTS = 5                  # wrong passwords for one username from one address before a pause
 MAX_ADDR_ATTEMPTS = 20            # wrong passwords for any usernames from one address before a pause
-LOCK_BASE = 30                    # the first pause; each further pause within an hour doubles it
-LOCK_MAX = 15 * 60
+FAIL_WINDOW = 15 * 60             # ... within this many seconds
+LOCK_BASE = 30                    # the first pause; each further one doubles it ...
+LOCK_MAX = 15 * 60                # ... up to this,
+QUIET_RESET = 3600                # ... until this long passes without a wrong password
 MIN_PASSWORD = 8                  # characters (Unicode code points)
 MAX_FIELD = 1024                  # longest username or password accepted
 MAX_BODY = 16 * 1024              # largest request body accepted
@@ -282,25 +285,28 @@ class Sessions:
 
 
 class Throttle:
-    """Wrong passwords per key (an address and username, an address, an account). After `limit` of them,
-    a pause of LOCK_BASE seconds, doubling for each further pause (up to LOCK_MAX), until the key has
-    been quiet for an hour. A check must be reserved with begin() before it runs, and no more checks can
-    run at once than there are attempts left, so attempts sent at the same moment can't overrun the limit."""
+    """Wrong passwords per key (an address and username, an address, an account). `limit` of them within
+    FAIL_WINDOW start a pause of LOCK_BASE seconds; each further pause doubles it (up to LOCK_MAX) until an
+    hour passes without a wrong password. Right passwords neither count nor keep old failures alive. A check
+    must be reserved with begin() before it runs, and no more checks can run at once than there are
+    attempts left, so attempts sent at the same moment can't overrun the limit."""
 
     def __init__(self, limit, forget_on_success):
         self.limit = limit
-        self.forget_on_success = forget_on_success   # a right password clears the key's count
+        self.forget_on_success = forget_on_success   # a right password clears the key's failures
         self.lock = threading.Lock()
         self.entries = {}
 
     def _entry(self, key, now):
         e = self.entries.get(key)
-        if e and (e['busy'] or now - e['last'] < 3600):
+        if e and (e['busy'] or now - e['last'] < QUIET_RESET):
+            while e['fails'] and now - e['fails'][0] >= FAIL_WINDOW:
+                e['fails'].popleft()
             return e
-        e = {'count': 0, 'locks': 0, 'until': 0.0, 'busy': 0, 'last': now}
+        e = {'fails': collections.deque(), 'locks': 0, 'until': 0.0, 'busy': 0, 'last': now}   # last: last wrong password
         self.entries[key] = e
         if len(self.entries) > 10000:
-            for k in [k for k, x in self.entries.items() if not x['busy'] and now - x['last'] >= 3600]:
+            for k in [k for k, x in self.entries.items() if not x['busy'] and now - x['last'] >= QUIET_RESET]:
                 del self.entries[k]
             self.entries[key] = e
         return e
@@ -318,10 +324,9 @@ class Throttle:
             e = self._entry(key, now)
             if e['until'] > now:
                 return math.ceil(e['until'] - now)
-            if e['count'] + e['busy'] >= self.limit:
+            if len(e['fails']) + e['busy'] >= self.limit:
                 return 1   # as many checks running as attempts left: try again in a moment
             e['busy'] += 1
-            e['last'] = now
             return 0
 
     def failed(self, key):
@@ -330,13 +335,13 @@ class Throttle:
         with self.lock:
             e = self._entry(key, now)
             e['busy'] = max(0, e['busy'] - 1)
-            e['count'] += 1
+            e['fails'].append(now)
             e['last'] = now
-            if e['count'] >= self.limit:
-                e['count'] = 0
+            if len(e['fails']) >= self.limit:
+                e['fails'].clear()
                 e['locks'] += 1
                 e['until'] = now + min(LOCK_BASE * 2 ** (e['locks'] - 1), LOCK_MAX)
-            return max(0, math.ceil(e['until'] - now)), self.limit - e['count']
+            return max(0, math.ceil(e['until'] - now)), self.limit - len(e['fails'])
 
     def release(self, key):
         """Give back a reservation whose check didn't run."""
@@ -353,8 +358,8 @@ class Throttle:
                 return
             e['busy'] = max(0, e['busy'] - 1)
             if self.forget_on_success:
-                e['count'] = 0
-                if not e['busy']:
+                e['fails'].clear()
+                if not e['busy'] and e['until'] <= time.monotonic():
                     del self.entries[key]
 
 
@@ -405,6 +410,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     server_version = 'ThreatSim'
     protocol_version = 'HTTP/1.1'
     timeout = 30   # seconds a connection may sit idle, or take to send or receive one chunk
+    disable_nagle_algorithm = True   # send each answer at once, without waiting for the client's ACK
 
     def version_string(self):
         return self.server_version
@@ -479,9 +485,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return path, urllib.parse.parse_qs(parts.query)
 
     def cookie_name(self):
-        # one name per instance (cookies ignore the port), so two servers on one host don't sign each other out
-        port = self.server.server_address[1]
-        return f'__Host-threatsim-{port}' if self.is_https() else f'threatsim-{port}'
+        # one name per instance (cookies ignore the port and the path), so two servers on one host name
+        # don't sign each other out
+        return f'__Host-threatsim-{self.server.instance}' if self.is_https() else f'threatsim-{self.server.instance}'
 
     def cookie_token(self):
         name = self.cookie_name()
@@ -509,20 +515,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             SESSIONS.end(token, reason)
         return None, reason
 
+    def body_length(self):
+        """The declared body length: None for no body, -1 when it can't be trusted (chunked, several or bad
+        Content-Length headers), else the number of bytes."""
+        get_all = getattr(getattr(self, 'headers', None), 'get_all', None)
+        values = (get_all('Content-Length') if get_all else None) or []
+        if self.header('Transfer-Encoding') or len(values) > 1:
+            return -1
+        if not values:
+            return None
+        value = values[0].strip()
+        return int(value) if LENGTH_RE.fullmatch(value) else -1
+
     def read_body(self):
         """The request body as bytes, or None after replying with an error."""
-        if self.header('Transfer-Encoding'):
-            self.close_connection = True
-            self.reply(411, 'Send a Content-Length.')
-            return None
-        length = self.header('Content-Length', None)
-        if length is None:
+        n = self.body_length()
+        if n is None:
             return b''   # no length and no chunking: no body
-        if not LENGTH_RE.fullmatch(length.strip()):
+        if n < 0:
             self.close_connection = True
-            self.reply(400, 'Bad Content-Length.')
+            self.reply(400, 'Send the body with one plain Content-Length.')
             return None
-        n = int(length)
         if n > MAX_BODY:
             self.close_connection = True
             self.reply(413, 'Request too large.')
@@ -621,7 +634,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.do_GET(head=True)
 
     def do_GET(self, head=False):
-        if self.header('Transfer-Encoding') or self.header('Content-Length', '0').strip() not in ('', '0'):
+        if self.body_length() not in (None, 0):
             self.close_connection = True   # a body nobody reads: don't let it be taken for the next request
         path, query = self.split_target()
         if path is None:
@@ -764,9 +777,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, addr, tls_context, behind_proxy):
+    def __init__(self, addr, tls_context, behind_proxy, instance):
         self.tls = tls_context is not None
         self.behind_proxy = behind_proxy
+        self.instance = instance   # names the session cookie
         self.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         if ':' in addr[0]:
             self.address_family = socket.AF_INET6
@@ -796,6 +810,32 @@ class Server(http.server.ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+def instance_id(data_dir, port):
+    """A random id kept in the data dir, naming this instance's session cookie. Falls back to the port."""
+    path = os.path.join(data_dir, 'instance')
+    try:
+        with open(path, encoding='ascii') as f:
+            value = f.read().strip()
+        if re.fullmatch(r'[0-9a-f]{8}', value):
+            return value
+    except (OSError, ValueError):
+        pass
+    value = secrets.token_hex(4)
+    try:
+        with open(path, 'w', encoding='ascii') as f:
+            f.write(value + '\n')
+        return value
+    except OSError:
+        return str(port)
+
+
+def port_number(text):
+    n = int(text)
+    if not 0 <= n <= 65535:
+        raise argparse.ArgumentTypeError('a port is 0 to 65535')
+    return n
+
+
 def set_password(user):
     user = normalize_user(user)
     if not user or len(user) > MAX_FIELD:
@@ -820,7 +860,7 @@ def main():
     global ACCOUNTS, SESSIONS, USER_TRIES, ADDR_TRIES, PASSWORD_TRIES, ROOT
     ap = argparse.ArgumentParser(description='Serve ThreatSim and require sign-in.')
     ap.add_argument('--host', default='127.0.0.1', help='address to listen on (default 127.0.0.1; 0.0.0.0 for all)')
-    ap.add_argument('--port', type=int, default=8000)
+    ap.add_argument('--port', type=port_number, default=8000)
     ap.add_argument('--data-dir', help='where users.json is kept (default ~/.local/share/threatsim)')
     ap.add_argument('--cert', help='TLS certificate (PEM) to serve HTTPS')
     ap.add_argument('--key', help='private key for --cert (PEM)')
@@ -857,7 +897,7 @@ def main():
         except (OSError, ssl.SSLError) as e:
             raise SystemExit(f'Cannot load --cert {args.cert} and --key {args.key}: {getattr(e, "strerror", None) or e}')
     try:
-        httpd = Server((args.host, args.port), ctx, args.behind_proxy)
+        httpd = Server((args.host, args.port), ctx, args.behind_proxy, instance_id(data_dir, args.port))
     except OSError as e:   # address in use, no such address, no IPv6 ...
         raise SystemExit(f'Cannot listen on {args.host} port {args.port}: {e.strerror or e}')
     port = httpd.server_address[1]
@@ -867,7 +907,10 @@ def main():
         local, wildcard = ip.is_loopback, ip.is_unspecified
     except ValueError:
         local, wildcard = args.host == 'localhost', False
-    where = 'localhost' if local else "<this computer's address>" if wildcard else f'[{args.host}]' if ':' in args.host else args.host
+    if args.host in ('127.0.0.1', '::1', 'localhost'):
+        where = 'localhost'   # the name browsers and the README use for this machine
+    else:
+        where = "<this computer's address>" if wildcard else f'[{args.host}]' if ':' in args.host else args.host
     log(f'ThreatSim on {scheme}://{where}:{port}/  (accounts: {ACCOUNTS.path})')
     if ACCOUNTS.default_in_use():
         log(f'Warning: {DEFAULT_USER} still has the default password "{DEFAULT_PASSWORD}". Sign in and change it.')

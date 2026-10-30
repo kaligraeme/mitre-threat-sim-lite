@@ -282,7 +282,7 @@
           signal();
         } else if (r.status === 401) {
           d.close();
-          leave('notchanged');
+          leave(r.body.ended === 'password' ? 'password' : 'notchanged');   // reset elsewhere: the old password is gone too
         } else {
           const message = r.body.message || (r.body.reason === 'origin'
             ? 'The server refused the request because it did not come from this address. Reload the page and try again.'

@@ -10,11 +10,13 @@
   const showPassword = $('#showPassword');
   const fields = { username: form.username, password: form.password };
   const PAGES = ['index.html', 'simulator.html'];
-  const PAUSE_KEY = 'threatsim.signin.pause';   // sessionStorage: when a sign-in pause ends, across reloads
+  const PAUSE_KEY = 'threatsim.signin.pause';   // sessionStorage: a sign-in pause, across reloads
   const LOCK_MAX = 15 * 60;                     // the longest pause the server gives (seconds)
   const params = new URLSearchParams(location.search);
   const next = PAGES.includes(params.get('next')) ? params.get('next') : '';
   let lockTimer = null;
+  let lock = null;   // { user, end }: the server paused sign-in for this username until end (performance.now())
+  let submitting = false;   // a sign-in request is on its way: leave the button alone
 
   const NO_SERVER = "Sign-in needs the ThreatSim server, and this page isn't coming from it. In the ThreatSim "
     + 'folder, run python3 server.py, then open the address it prints.';
@@ -64,39 +66,51 @@
 
   const store = (fn, fallback) => { try { return fn(); } catch (_) { return fallback; } };   // storage may be blocked
 
+  const userKey = name => String(name || '').trim().toLowerCase();   // close to the server's NFKC + casefold
+
   /**
-   * After too many failed attempts the server pauses sign-in. The message is announced once; the
-   * countdown is on the button, so screen readers don't repeat it every second.
+   * After too many failed attempts the server pauses sign-in for that username (from this address). The
+   * button waits while the username field still holds it; another username can be tried at once. The
+   * message is announced once; the countdown is on the button, so screen readers don't repeat it.
    */
-  function showLock(seconds) {
+  function showLock(seconds, user, save = true) {
     clearInterval(lockTimer);
+    lock = { user: userKey(user), end: performance.now() + seconds * 1000 };   // monotonic: system clock changes don't matter
+    if (save) store(() => sessionStorage.setItem(PAUSE_KEY, JSON.stringify({ user: lock.user, start: Date.now(), wait: seconds })));
     keepFocus();
-    button.disabled = true;
-    store(() => sessionStorage.setItem(PAUSE_KEY, String(Date.now() + seconds * 1000)));
-    showError(`Too many failed attempts. Sign-in is paused for ${seconds} second${seconds === 1 ? '' : 's'}.`);
-    const end = performance.now() + seconds * 1000;   // a monotonic clock: unaffected by changes to the system time
-    const tick = () => {
-      const left = Math.ceil((end - performance.now()) / 1000);
-      if (left <= 0) {
-        clearInterval(lockTimer);
-        store(() => sessionStorage.removeItem(PAUSE_KEY));
-        button.disabled = false;
-        button.textContent = 'Sign in';
-        clearError();
-        status.textContent = 'You can sign in again.';
-        return;
-      }
-      button.textContent = `Try again in ${left} s`;
-    };
-    tick();
-    lockTimer = setInterval(tick, 1000);
+    showError(`Too many failed attempts. Sign-in as ${user.trim()} is paused for ${seconds} second${seconds === 1 ? '' : 's'}.`);
+    submitting = false;
+    applyLock();
+    lockTimer = setInterval(applyLock, 1000);
+  }
+
+  function applyLock() {
+    if (!lock) return;
+    const left = Math.ceil((lock.end - performance.now()) / 1000);
+    if (left <= 0) {
+      clearInterval(lockTimer);
+      lock = null;
+      store(() => sessionStorage.removeItem(PAUSE_KEY));
+      button.disabled = false;
+      button.textContent = 'Sign in';
+      clearError();
+      status.textContent = 'You can sign in again.';
+      return;
+    }
+    if (submitting) return;
+    const paused = userKey(fields.username.value) === lock.user;
+    button.disabled = paused;
+    button.textContent = paused ? `Try again in ${left} s` : 'Sign in';
   }
 
   const failed = r => 'Wrong username or password.'
     + (r.left <= 2 ? ` ${r.left} more ${r.left === 1 ? 'try' : 'tries'} before sign-in pauses.` : '');
 
-  /** What an answer says about the server: 'ok' (ThreatSim answered), 'away' (a proxy couldn't reach it) or 'none'. */
-  const kind = (res, body) => (body ? 'ok' : [502, 503, 504].includes(res.status) ? 'away' : 'none');
+  /**
+   * What an answer says about the server: 'ok' (ThreatSim answered), 'away' (a proxy in front couldn't reach
+   * it just now: any 5xx but 501) or 'none' (something else answered, such as a plain web server's 404 or 501).
+   */
+  const kind = (res, body) => (body ? 'ok' : res.status >= 500 && res.status !== 501 ? 'away' : 'none');
   const readJson = async res => { try { return await res.json(); } catch (_) { return null; } };
 
   // The browser can restore the box as ticked (Back, reload) without a change event.
@@ -122,9 +136,14 @@
 
   // The button starts disabled in the HTML, so the form can't be sent before this script runs.
   button.disabled = false;
-  const pausedUntil = Number(store(() => sessionStorage.getItem(PAUSE_KEY), 0)) || 0;
-  const pauseLeft = Math.ceil((pausedUntil - Date.now()) / 1000);
-  if (pauseLeft > 0 && pauseLeft <= LOCK_MAX) showLock(pauseLeft);
+  fields.username.addEventListener('input', applyLock);
+  const saved = store(() => JSON.parse(sessionStorage.getItem(PAUSE_KEY)), null);
+  if (saved && typeof saved.user === 'string' && saved.wait > 0 && saved.wait <= LOCK_MAX) {
+    const left = Math.ceil((saved.start + saved.wait * 1000 - Date.now()) / 1000);
+    // a start in the future means the clock went back: drop it rather than trust it
+    if (saved.start <= Date.now() && left > 0) showLock(left, saved.user, false);
+    else store(() => sessionStorage.removeItem(PAUSE_KEY));
+  }
 
   if (location.protocol === 'file:') {
     showError(NO_SERVER);
@@ -160,6 +179,7 @@
     keepFocus();
     button.disabled = true;
     button.textContent = 'Signing in…';
+    submitting = true;
     let stay = false;   // true when the button must stay disabled: signed in (leaving) or paused
     try {
       let res;
@@ -190,7 +210,7 @@
         }
       } else if (r.reason === 'locked') {
         stay = true;
-        showLock(r.wait || 30);
+        showLock(r.wait || 30, username);
       } else if (r.reason === 'origin') {
         showError(ORIGIN);
       } else {
@@ -198,9 +218,11 @@
         fields.password.select();
       }
     } finally {
+      submitting = false;
       if (!stay) {
         button.disabled = false;
         button.textContent = 'Sign in';
+        applyLock();   // another username's pause may still be counting down
       }
     }
   });

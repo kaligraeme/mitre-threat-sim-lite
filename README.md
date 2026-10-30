@@ -28,14 +28,15 @@ and the sign-in page says why, but the files are out.)
   the server's memory. A session ends after 12 hours without use, or when you sign out, which also
   takes this browser's other ThreatSim tabs to the sign-in page. It also ends when the password is
   changed elsewhere, or when the server restarts.
-- **Failed sign-ins:** after five wrong passwords for one username from one address, signing in to
-  that username from there pauses for 30 seconds. After twenty wrong passwords for any usernames, the
-  whole address pauses. Each further pause within the hour doubles, up to 15 minutes. Five wrong
+- **Failed sign-ins:** five wrong passwords for one username from one address within 15 minutes pause
+  signing in to that username from there for 30 seconds. Twenty wrong passwords from one address
+  within 15 minutes, for any usernames, pause the whole address. Each further pause doubles, up to 15
+  minutes, until an hour passes without a wrong password. Right passwords don't count. Five wrong
   current passwords in **Change password** pause changes to that account in the same way.
 - **Passwords** are stored only as PBKDF2-HMAC-SHA-256 hashes (310,000 iterations, random salt) in
-  `users.json` (mode 600). By default it lives in `~/.local/share/threatsim`, outside the app folder;
-  `--data-dir` puts it elsewhere. The server never serves anything but the app's pages, `css/` and
-  `js/`.
+  `users.json` (mode 600). By default it lives outside the app folder, in `~/.local/share/threatsim`
+  (`$XDG_DATA_HOME/threatsim` if that is set, `%LOCALAPPDATA%\threatsim` on Windows); `--data-dir` puts
+  it elsewhere. The server never serves anything but the app's pages, `css/` and `js/`.
 - **Forgotten password, or another account:** `python3 server.py --set-password admin` (or a new
   username) asks for a new password. You can run it while the server is running; that account's
   sessions end.
@@ -252,15 +253,15 @@ or later can run `server.py`; only the service and proxy set-up differ.
    `RequestHeader set X-Forwarded-Proto "https"` in the `*:443` virtual host that holds the SSL
    settings. With Caddy, `reverse_proxy 127.0.0.1:8000` is enough.
 
-5. **Open the firewall for the web ports**, 443, and 80 for the redirect, and keep your way in, such as
-   SSH, open. With ufw:
+5. **Open the firewall for the web ports**, 443, and 80 for the redirect and certbot, and keep your way
+   in, such as SSH, open. With ufw:
 
    ```bash
    sudo ufw allow OpenSSH
    ```
 
    ```bash
-   sudo ufw allow 'Nginx Full'
+   sudo ufw allow 80,443/tcp
    ```
 
    ```bash
@@ -280,9 +281,15 @@ root, so have it copy them where the service can read them, at issue and at ever
 sudo certbot certonly --standalone -d threatsim.example.com --deploy-hook 'install -D -m 640 -g threatsim -t /etc/threatsim "$RENEWED_LINEAGE"/fullchain.pem "$RENEWED_LINEAGE"/privkey.pem && systemctl restart threatsim'
 ```
 
-Then run it with `--host 0.0.0.0 --port 443 --cert /etc/threatsim/fullchain.pem --key
-/etc/threatsim/privkey.pem`, and add `AmbientCapabilities=CAP_NET_BIND_SERVICE` to the service so it
-can use port 443. The hook restarts it after each renewal, because it reads the certificate only when it
+certbot's standalone mode answers on port 80 itself, so keep port 80 open and free of other servers, at
+issue and at every renewal. In the service, use this `ExecStart` and add
+`AmbientCapabilities=CAP_NET_BIND_SERVICE` so it can use port 443:
+
+```ini
+ExecStart=/usr/bin/python3 /opt/threatsim/server.py --host 0.0.0.0 --port 443 --data-dir /var/lib/threatsim --cert /etc/threatsim/fullchain.pem --key /etc/threatsim/privkey.pem
+```
+
+The hook restarts the service after each renewal, because the server reads the certificate only when it
 starts. Prefer the reverse proxy for anything facing the internet: it shields the server from slow or
 flooding clients. The server's own defence is a cap of 128 open connections.
 
@@ -370,4 +377,4 @@ Technique (ICS) --targets--> Asset
 A new page must load `js/auth.js` in its `<head>`, like `index.html` and `simulator.html`. The server only
 serves files it knows, so also add the page to `ROOT_FILES` in `server.py`. To let sign-in return to it,
 add it to `PAGES` in `server.py`, `js/auth.js` and `js/login.js`. Files outside `css/` and `js/` need
-their folder added to `SERVED_DIRS`.
+their folder added to `SERVED_DIRS`, and a file type not listed in `TYPES` needs adding there.
