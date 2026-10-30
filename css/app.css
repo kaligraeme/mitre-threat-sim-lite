@@ -136,7 +136,8 @@ main.signin { display: flex; flex-direction: column; align-items: center; paddin
 .auth-form { display: flex; flex-direction: column; gap: 6px; }
 .auth-form label:not(.chk) { font-size: 14px; font-weight: 600; margin-top: 8px; }
 .auth-form input:not([type="checkbox"]) {
-  font: inherit; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--field-border);
+  font: inherit; font-size: 16px;   /* 16px or more: iPhone Safari zooms into smaller fields */
+  padding: 9px 11px; border-radius: 8px; border: 1px solid var(--field-border);
   background: var(--surface); color: var(--text); width: 100%;
 }
 .auth-form input[aria-invalid="true"] { border-color: var(--err); }
@@ -153,6 +154,7 @@ main.signin { display: flex; flex-direction: column; align-items: center; paddin
 .account .who { font-weight: 600; padding: 0 6px; }
 .account .account-note { color: var(--ok); font-size: 13px; padding: 0 6px; }
 .account .account-note:empty { padding: 0; }
+.account .account-note.err { color: var(--err); }
 .account button.link { font-size: 14px; }
 .auth-banner { background: color-mix(in srgb, var(--warn) 14%, var(--surface)); border-bottom: 1px solid var(--border); }
 .auth-banner .wrap { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding-top: 8px; padding-bottom: 8px; font-size: 14px; }

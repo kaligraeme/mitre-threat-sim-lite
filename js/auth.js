@@ -113,7 +113,9 @@
     let r = null;
     try { r = await api('logout', { method: 'POST' }); } catch (_) { /* unreachable */ }
     if (!r || r.status !== 200) {
-      say("Couldn't sign out: the server didn't answer. Try again.");
+      say(!r || r.status >= 500 ? "Couldn't sign out: the server didn't answer. Try again."
+        : r.body.reason === 'origin' ? "Couldn't sign out: the server refused a request that didn't come from its own address. Reload the page and try again."
+          : "Couldn't sign out. Reload the page and try again.", 'err');
       return;
     }
     signal();
@@ -136,13 +138,16 @@
 
   let dialog = null;
   let resetDialog = null;
+  let dialogBusy = () => false;
   let note = null;        // the header's status line ("Password changed")
   let noteTimer = 0;
 
-  function say(text) {
+  /** Show a short status line in the header; kind 'err' for a failure. */
+  function say(text, kind) {
     if (!note) return;
     global.clearTimeout(noteTimer);
     note.textContent = text;
+    note.classList.toggle('err', kind === 'err');
     noteTimer = global.setTimeout(() => { note.textContent = ''; }, 10000);
   }
 
@@ -191,7 +196,7 @@
   function openPasswordDialog() {
     if (!dialog) dialog = buildDialog();
     if (dialog.open) return;
-    resetDialog();
+    if (!dialogBusy()) resetDialog();   // reopened while a change is still being saved: show that one
     dialog.showModal();
     dialog.querySelector('#pwCurrent').focus();
   }
@@ -239,6 +244,7 @@
       }
     };
     let busy = false;
+    dialogBusy = () => busy;
     resetDialog = () => { for (const i of Object.values(inputs)) i.value = ''; clearError(); };
     cancel.addEventListener('click', () => d.close());
     d.addEventListener('cancel', e => { if (busy) e.preventDefault(); });   // Escape while the change is being saved
@@ -252,6 +258,7 @@
       const problem = precheck(values.current, values.next, values.confirm);
       if (problem) { showError(problem.message, problem.field); return; }
       busy = true;
+      if (doc.activeElement === submit) inputs.confirm.focus();   // a disabled button would drop focus to the page
       submit.disabled = cancel.disabled = true;
       submit.textContent = 'Changing…';
       try {
@@ -275,18 +282,19 @@
           signal();
         } else if (r.status === 401) {
           d.close();
-          leave(r.body.ended || 'ended');
+          leave('notchanged');
         } else {
           const message = r.body.message || (r.body.reason === 'origin'
             ? 'The server refused the request because it did not come from this address. Reload the page and try again.'
             : 'The password was not changed. Try again.');
           if (d.open) showError(message, r.body.field);
-          else say('Password not changed: ' + message);
+          else say('Password not changed: ' + message, 'err');
         }
       } finally {
         busy = false;
         submit.disabled = cancel.disabled = false;
         submit.textContent = 'Change password';
+        if (d.open && !d.contains(doc.activeElement)) inputs.current.focus();   // keep keyboard users in the dialog
       }
     });
     doc.body.append(d);

@@ -16,28 +16,36 @@ Software, to the techniques they use, then to the relevant mitigations and detec
 ThreatSim runs behind its own small server, `server.py`, which checks the session on every request.
 Until you sign in it serves only the sign-in page and the stylesheet and script that page needs. The
 Data page, the Simulator and all their scripts are refused: pages redirect to sign-in, anything else
-gets 401. Run it as described under [Run](#run). Serving the folder with any other web server would
-leave the app open to anyone, so the pages then refuse to start and the sign-in page says why.
+gets 401. Run it as described under [Run](#run). Don't serve the folder with any other web server:
+anyone could then download the app's files without signing in. (The pages notice and refuse to start,
+and the sign-in page says why, but the files are out.)
 
 - **First sign-in:** username `admin`, password `admin`. Until that password is changed, the server
   warns when it starts and every page shows a banner. **Change password** is in the page header. The
   new password needs at least 8 characters and can't be the current one, the username or `admin`.
-  Changing it ends that account's sessions in other browsers.
+  Changing it ends that account's sessions in other browsers and gives this browser a new session.
 - **Sessions** are a random token in an HttpOnly cookie (SameSite=Lax, and Secure over HTTPS), kept in
   the server's memory. A session ends after 12 hours without use, or when you sign out, which also
   takes this browser's other ThreatSim tabs to the sign-in page. It also ends when the password is
   changed elsewhere, or when the server restarts.
-- **Failed sign-ins:** after five wrong passwords from one address, sign-in from it pauses for 30
-  seconds. Each further pause within the hour doubles, up to 15 minutes.
+- **Failed sign-ins:** after five wrong passwords for one username from one address, signing in to
+  that username from there pauses for 30 seconds. After twenty wrong passwords for any usernames, the
+  whole address pauses. Each further pause within the hour doubles, up to 15 minutes. Five wrong
+  current passwords in **Change password** pause changes to that account in the same way.
 - **Passwords** are stored only as PBKDF2-HMAC-SHA-256 hashes (310,000 iterations, random salt) in
-  `.threatsim/users.json` (mode 600). The server never serves that file, `server.py` or anything else
-  outside the app's pages, `css/` and `js/`.
+  `users.json` (mode 600). By default it lives in `~/.local/share/threatsim`, outside the app folder;
+  `--data-dir` puts it elsewhere. The server never serves anything but the app's pages, `css/` and
+  `js/`.
 - **Forgotten password, or another account:** `python3 server.py --set-password admin` (or a new
   username) asks for a new password. You can run it while the server is running; that account's
   sessions end.
 
 Your browser downloads the MITRE data straight from GitHub and keeps it in its own database
-(IndexedDB), as before. The server only serves the app.
+(IndexedDB), as before. The server only serves the app. That data, and the Simulator's threat profile
+and posture, belong to the browser and the exact address you open, not to the account. Every account
+that signs in from that browser shares them, and they stay after sign-out, so people who share a
+computer should use separate browser profiles. `localhost` and `127.0.0.1` count as different
+addresses, so keep to one.
 
 ## Simulator
 
@@ -137,7 +145,7 @@ Options:
 |---|---|---|
 | `--host` | `127.0.0.1` | address to listen on; `0.0.0.0` for every interface |
 | `--port` | `8000` | |
-| `--data-dir` | `.threatsim` beside `server.py` | where `users.json` (the accounts) is kept |
+| `--data-dir` | `~/.local/share/threatsim` | where `users.json` (the accounts) is kept; keep it outside the app folder |
 | `--cert`, `--key` | | serve HTTPS with this certificate and private key (PEM) |
 | `--behind-proxy` | off | take the visitor's address and the scheme from a reverse proxy on the same machine |
 | `--set-password USER` | | set USER's password (creating the account if new), then exit |
@@ -167,7 +175,8 @@ or later can run `server.py`; only the service and proxy set-up differ.
    ```
 
 2. **Set the admin password before the server can be reached**, so `admin` / `admin` never works on
-   the network. Add other accounts the same way, for example `--set-password alice`.
+   the network. Check that it ends with `Saved in /var/lib/threatsim/users.json`. Add other accounts
+   the same way, for example `--set-password alice`.
 
    ```bash
    sudo -u threatsim python3 /opt/threatsim/server.py --data-dir /var/lib/threatsim --set-password admin
@@ -205,9 +214,12 @@ or later can run `server.py`; only the service and proxy set-up differ.
    ```
 
    `sudo journalctl -u threatsim` shows its start-up messages and a line for each request.
+   `ProtectHome=true` hides `/home` and `/root` from the service, so keep the code and the data
+   directory elsewhere, as here.
 
-4. **Put nginx in front for HTTPS.** Get a certificate for the name (for example with certbot), then
-   add a site like this and reload nginx (`sudo nginx -t && sudo systemctl reload nginx`):
+4. **Put nginx in front for HTTPS.** Get a certificate for the name with certbot's nginx plugin, which
+   also renews it through nginx (`sudo certbot certonly --nginx -d threatsim.example.com`). Then add a
+   site like this and reload nginx (`sudo nginx -t && sudo systemctl reload nginx`):
 
    ```nginx
    server {
@@ -232,27 +244,55 @@ or later can run `server.py`; only the service and proxy set-up differ.
    ```
 
    The proxy must pass on the Host header that the browser sent, port included. The server refuses
-   any sign-in whose origin doesn't match it. With Apache, use `ProxyPreserveHost On`, `ProxyPass /
-   http://127.0.0.1:8000/` and `RequestHeader set X-Forwarded-Proto "https"`. With Caddy,
-   `reverse_proxy 127.0.0.1:8000` is enough.
+   any sign-in whose origin doesn't match it. The redirect block assumes HTTPS on port 443. The server
+   adds a Strict-Transport-Security header to its HTTPS answers itself.
 
-5. **Open only the web ports** in the firewall: 443, and 80 for the redirect. The service listens on
-   127.0.0.1, so port 8000 can't be reached from outside anyway.
+   With Apache, enable the modules (`sudo a2enmod proxy proxy_http headers ssl`), then put
+   `ProxyPreserveHost On`, `ProxyPass / http://127.0.0.1:8000/` and
+   `RequestHeader set X-Forwarded-Proto "https"` in the `*:443` virtual host that holds the SSL
+   settings. With Caddy, `reverse_proxy 127.0.0.1:8000` is enough.
+
+5. **Open the firewall for the web ports**, 443, and 80 for the redirect, and keep your way in, such as
+   SSH, open. With ufw:
+
+   ```bash
+   sudo ufw allow OpenSSH
+   ```
+
+   ```bash
+   sudo ufw allow 'Nginx Full'
+   ```
+
+   ```bash
+   sudo ufw enable
+   ```
+
+   The service listens on 127.0.0.1, so port 8000 can't be reached from outside anyway.
 
 6. **Sign in** at `https://threatsim.example.com` with the password from step 2, then pull the data on
    the Data page. Each person's browser downloads the MITRE data itself, from
    `raw.githubusercontent.com`, so their network must allow that.
 
-**Without a reverse proxy**, ThreatSim can serve HTTPS itself. Run it with `--host 0.0.0.0 --port 443
---cert /path/fullchain.pem --key /path/privkey.pem`, and add `AmbientCapabilities=CAP_NET_BIND_SERVICE`
-to the service so it can use port 443. It reads the certificate when it starts, so restart it after
-each renewal.
+**Without a reverse proxy**, ThreatSim can serve HTTPS itself. certbot keeps its keys readable only by
+root, so have it copy them where the service can read them, at issue and at every renewal:
+
+```bash
+sudo certbot certonly --standalone -d threatsim.example.com --deploy-hook 'install -D -m 640 -g threatsim -t /etc/threatsim "$RENEWED_LINEAGE"/fullchain.pem "$RENEWED_LINEAGE"/privkey.pem && systemctl restart threatsim'
+```
+
+Then run it with `--host 0.0.0.0 --port 443 --cert /etc/threatsim/fullchain.pem --key
+/etc/threatsim/privkey.pem`, and add `AmbientCapabilities=CAP_NET_BIND_SERVICE` to the service so it
+can use port 443. The hook restarts it after each renewal, because it reads the certificate only when it
+starts. Prefer the reverse proxy for anything facing the internet: it shields the server from slow or
+flooding clients. The server's own defence is a cap of 128 open connections.
 
 **Looking after it:**
 
 - **Updating:** `sudo git -C /opt/threatsim pull`, then `sudo systemctl restart threatsim`. Restarting
   signs everyone out.
 - **Back up** `/var/lib/threatsim/users.json`, which holds the accounts.
+- **Run commands as the service account** (`sudo -u threatsim ...`), as in step 2. If you run
+  `--set-password` as root, it keeps the file owned by the account that owns the data directory.
 - **Forgotten password:** run the step 2 command again. It works while the service is running and ends
   that account's sessions.
 - **Don't serve the folder any other way.** Don't point a web server's document root (nginx `root`,
@@ -326,3 +366,8 @@ Technique (ICS) --targets--> Asset
 `getObjects(domain, kind)`, `getObject(domain, id)`, `getRaw(domain, id)`, `findByAttackId(id, domain?)`,
 `relationshipsFrom(domain, id, relType?)`, `relationshipsTo(domain, id, relType?)`,
 `relationshipsByType(domain, relType)`, `search(text, {domain, kinds, limit})`, `getAllMeta()`.
+
+A new page must load `js/auth.js` in its `<head>`, like `index.html` and `simulator.html`. The server only
+serves files it knows, so also add the page to `ROOT_FILES` in `server.py`. To let sign-in return to it,
+add it to `PAGES` in `server.py`, `js/auth.js` and `js/login.js`. Files outside `css/` and `js/` need
+their folder added to `SERVED_DIRS`.

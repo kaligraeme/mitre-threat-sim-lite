@@ -19,6 +19,7 @@
     <p class="sub">Threat simulator for MITRE ATT&amp;CK and ATLAS.</p>
     <p id="signInStatus" class="form-status" role="status"></p>
     <form id="signInForm" class="auth-form" method="post" action="login" novalidate>
+      <input type="hidden" name="next">
       <label for="username">Username</label>
       <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
       <label for="password">Password</label>

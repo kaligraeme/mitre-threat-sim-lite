@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ThreatSim server: serves the app and makes everyone sign in before they can use it.
 
-    python3 server.py                         # http://127.0.0.1:8000
+    python3 server.py                         # http://localhost:8000
     python3 server.py --host 0.0.0.0 --port 8443 --cert cert.pem --key key.pem
     python3 server.py --set-password admin    # set or reset a password (creates the account if new)
 
@@ -10,11 +10,12 @@ served. Every other page and script, including the Data page (index.html) and th
 a signed-in session; a page asked for without one redirects to login.html, anything else gets 401.
 
 Accounts are kept in <data dir>/users.json as PBKDF2-HMAC-SHA-256 hashes (310,000 iterations,
-random salt). On first start the file is created with the account admin / admin. Sessions are an
-HttpOnly cookie holding a random token, kept in memory: restarting the server signs everyone out.
-Only the Python standard library is used.
+random salt), outside the app folder. On first start the file is created with the account
+admin / admin. Sessions are an HttpOnly cookie holding a random token, kept in memory: restarting
+the server signs everyone out. Only the Python standard library is used.
 """
 import argparse
+import contextlib
 import getpass
 import hashlib
 import hmac
@@ -41,12 +42,14 @@ DEFAULT_USER = 'admin'
 DEFAULT_PASSWORD = 'admin'
 ITERATIONS = 310_000              # PBKDF2 rounds for new hashes; each record keeps its own count
 SESSION_IDLE = 12 * 3600          # a session ends after this long without use (seconds)
-MAX_ATTEMPTS = 5                  # failed sign-ins from one address before a pause
+MAX_ATTEMPTS = 5                  # wrong passwords for one username from one address before a pause
+MAX_ADDR_ATTEMPTS = 20            # wrong passwords for any usernames from one address before a pause
 LOCK_BASE = 30                    # the first pause; each further pause within an hour doubles it
 LOCK_MAX = 15 * 60
 MIN_PASSWORD = 8                  # characters (Unicode code points)
 MAX_FIELD = 1024                  # longest username or password accepted
 MAX_BODY = 16 * 1024              # largest request body accepted
+MAX_CONNECTIONS = 128             # open connections at once; more are dropped
 PAGES = ('index.html', 'simulator.html')               # signed-in pages sign-in may return to
 PUBLIC = {'login.html', 'css/app.css', 'js/login.js'}  # served without a session
 ROOT_FILES = {'index.html', 'simulator.html', 'login.html'}
@@ -58,12 +61,25 @@ TYPES = {
     '.ico': 'image/x-icon', '.woff2': 'font/woff2',
 }
 TOKEN_RE = re.compile(r'[A-Za-z0-9_-]{32,128}')
+LENGTH_RE = re.compile(r'[0-9]{1,9}')
 DUMMY_SALT = bytes(16)
 HASH_SLOTS = threading.BoundedSemaphore(max(1, min(4, os.cpu_count() or 1)))   # hashes running at once
+WRITE_CHUNK = 64 * 1024           # the 30 s socket timeout applies to each chunk, not to a whole file
 
 
 def log(msg):
     print(msg, file=sys.stderr, flush=True)
+
+
+def default_data_dir():
+    """Where users.json lives unless --data-dir says otherwise: outside the app folder, so that serving
+    the folder with another web server by mistake can never publish the password hashes."""
+    legacy = os.path.join(APP_DIR, '.threatsim')
+    if os.path.exists(os.path.join(legacy, 'users.json')):
+        return legacy   # where the first version kept it; main() warns
+    base = os.environ.get('XDG_DATA_HOME') or (os.environ.get('LOCALAPPDATA') if os.name == 'nt' else None) \
+        or os.path.join(os.path.expanduser('~'), '.local', 'share')
+    return os.path.join(base, 'threatsim')
 
 
 # ---------- passwords ----------
@@ -118,15 +134,17 @@ def password_problem(user, current, new, confirm):
 
 class Accounts:
     """users.json: {"users": {name: {salt, hash, iterations, isDefault, changed}}}, re-read when it changes
-    on disk (for --set-password while the server runs) and written atomically with mode 0600."""
+    on disk (for --set-password while the server runs) and written atomically with mode 0600. The copy in
+    memory changes only once a write has succeeded."""
 
-    def __init__(self, path):
+    def __init__(self, path, create_default=True):
         self.path = path
         self.lock = threading.Lock()
         self.users, self.stamp = {}, None
         if not os.path.exists(path):
-            self.users = {DEFAULT_USER: make_record(DEFAULT_PASSWORD, is_default=True)}
-            self._save()
+            if not create_default:
+                return   # --set-password on a new data dir: nothing is written until a password is accepted
+            self._save({DEFAULT_USER: make_record(DEFAULT_PASSWORD, is_default=True)})
             log(f'Created {path} with the account {DEFAULT_USER} / {DEFAULT_PASSWORD}.')
         self._reload()
 
@@ -141,21 +159,50 @@ class Accounts:
             if not isinstance(users, dict) or not all(isinstance(r, dict) for r in users.values()):
                 raise ValueError('no "users" object')
             self.users, self.stamp = users, (st.st_mtime_ns, st.st_size)
-        except (OSError, ValueError) as e:   # keep the accounts already loaded; never fall back to a default
+        except FileNotFoundError:
+            if self.stamp is not None:
+                log(f'Warning: {self.path} has gone; still using the accounts loaded before.')
+        except PermissionError:   # keep the accounts already loaded; never fall back to a default
             if self.stamp is None:
-                raise SystemExit(f'Cannot read the accounts file {self.path}: {e}. Fix it, or delete it to start again with {DEFAULT_USER} / {DEFAULT_PASSWORD}.')
+                raise SystemExit(f'Cannot read the accounts file {self.path}: permission denied. Make it owned by '
+                                 'the account that runs the server (run --set-password as that account).')
+            log(f'Warning: cannot read {self.path} (permission denied); still using the accounts loaded before.')
+        except (OSError, ValueError) as e:
+            if self.stamp is None:
+                raise SystemExit(f'Cannot read the accounts file {self.path}: {e}. Fix it, or move it away to '
+                                 f'start again with {DEFAULT_USER} / {DEFAULT_PASSWORD}.')
             log(f'Warning: cannot re-read {self.path} ({e}); still using the accounts loaded before.')
 
-    def _save(self):
+    def _owner(self):
+        """When root writes the file (sudo --set-password), keep it with the account that owns the data."""
+        if not hasattr(os, 'geteuid') or os.geteuid() != 0:
+            return None
+        for p in (self.path, os.path.dirname(self.path)):
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            return (st.st_uid, st.st_gid) if st.st_uid != 0 else None
+        return None
+
+    def _save(self, users):
         tmp = f'{self.path}.{os.getpid()}.tmp'
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump({'users': self.users}, f, indent=1)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, self.path)
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump({'users': users}, f, indent=1)
+                f.flush()
+                os.fsync(f.fileno())
+            owner = self._owner()
+            if owner:
+                os.chown(tmp, *owner)
+            os.replace(tmp, self.path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
         st = os.stat(self.path)
-        self.stamp = (st.st_mtime_ns, st.st_size)
+        self.users, self.stamp = users, (st.st_mtime_ns, st.st_size)
 
     def get(self, user):
         with self.lock:
@@ -163,11 +210,17 @@ class Accounts:
             rec = self.users.get(user)
             return dict(rec) if isinstance(rec, dict) else None
 
-    def set(self, user, rec):
+    def set(self, user, rec, expect=None):
+        """Save rec as user's record. With expect (a hash), only if the stored record still has that
+        hash: returns False if it changed meanwhile. Raises OSError if the file can't be written."""
         with self.lock:
             self._reload()
-            self.users[user] = rec
-            self._save()
+            if expect is not None and (self.users.get(user) or {}).get('hash') != expect:
+                return False
+            users = dict(self.users)
+            users[user] = rec
+            self._save(users)
+            return True
 
     def default_in_use(self):
         rec = self.get(DEFAULT_USER)
@@ -213,12 +266,6 @@ class Sessions:
                 s['last'] = now
             return dict(s), None
 
-    def restamp(self, token, stamp):
-        with self.lock:
-            s = self.live.get(self.key(token))
-            if s:
-                s['stamp'] = stamp
-
     def end(self, token, reason='signedout'):
         k = self.key(token)
         with self.lock:
@@ -235,43 +282,105 @@ class Sessions:
 
 
 class Throttle:
-    """Failed sign-ins per client address: after MAX_ATTEMPTS, a pause of LOCK_BASE seconds, doubling for
-    each further pause (up to LOCK_MAX) until the address has been quiet for an hour."""
+    """Wrong passwords per key (an address and username, an address, an account). After `limit` of them,
+    a pause of LOCK_BASE seconds, doubling for each further pause (up to LOCK_MAX), until the key has
+    been quiet for an hour. A check must be reserved with begin() before it runs, and no more checks can
+    run at once than there are attempts left, so attempts sent at the same moment can't overrun the limit."""
 
-    def __init__(self):
+    def __init__(self, limit, forget_on_success):
+        self.limit = limit
+        self.forget_on_success = forget_on_success   # a right password clears the key's count
         self.lock = threading.Lock()
-        self.by_addr = {}
+        self.entries = {}
 
-    def _entry(self, addr, now):
-        e = self.by_addr.get(addr)
-        return e if e and now - e['last'] < 3600 else None
+    def _entry(self, key, now):
+        e = self.entries.get(key)
+        if e and (e['busy'] or now - e['last'] < 3600):
+            return e
+        e = {'count': 0, 'locks': 0, 'until': 0.0, 'busy': 0, 'last': now}
+        self.entries[key] = e
+        if len(self.entries) > 10000:
+            for k in [k for k, x in self.entries.items() if not x['busy'] and now - x['last'] >= 3600]:
+                del self.entries[k]
+            self.entries[key] = e
+        return e
 
-    def wait(self, addr):
+    def wait(self, key):
         now = time.monotonic()
         with self.lock:
-            e = self._entry(addr, now)
+            e = self.entries.get(key)
             return max(0, math.ceil(e['until'] - now)) if e else 0
 
-    def fail(self, addr):
-        """Count a failure. Returns (seconds paused, attempts left before the next pause)."""
+    def begin(self, key):
+        """Reserve a check. Returns 0 if it may run, else the seconds to wait."""
         now = time.monotonic()
         with self.lock:
-            e = self._entry(addr, now) or {'count': 0, 'locks': 0, 'until': 0.0}
+            e = self._entry(key, now)
+            if e['until'] > now:
+                return math.ceil(e['until'] - now)
+            if e['count'] + e['busy'] >= self.limit:
+                return 1   # as many checks running as attempts left: try again in a moment
+            e['busy'] += 1
+            e['last'] = now
+            return 0
+
+    def failed(self, key):
+        """A reserved check failed. Returns (seconds paused, attempts left before the next pause)."""
+        now = time.monotonic()
+        with self.lock:
+            e = self._entry(key, now)
+            e['busy'] = max(0, e['busy'] - 1)
             e['count'] += 1
             e['last'] = now
-            if e['count'] >= MAX_ATTEMPTS:
+            if e['count'] >= self.limit:
                 e['count'] = 0
                 e['locks'] += 1
                 e['until'] = now + min(LOCK_BASE * 2 ** (e['locks'] - 1), LOCK_MAX)
-            self.by_addr[addr] = e
-            if len(self.by_addr) > 10000:
-                for a in [a for a, x in self.by_addr.items() if now - x['last'] >= 3600]:
-                    del self.by_addr[a]
-            return max(0, math.ceil(e['until'] - now)), MAX_ATTEMPTS - e['count']
+            return max(0, math.ceil(e['until'] - now)), self.limit - e['count']
 
-    def clear(self, addr):
+    def release(self, key):
+        """Give back a reservation whose check didn't run."""
         with self.lock:
-            self.by_addr.pop(addr, None)
+            e = self.entries.get(key)
+            if e:
+                e['busy'] = max(0, e['busy'] - 1)
+
+    def passed(self, key):
+        """A reserved check passed."""
+        with self.lock:
+            e = self.entries.get(key)
+            if not e:
+                return
+            e['busy'] = max(0, e['busy'] - 1)
+            if self.forget_on_success:
+                e['count'] = 0
+                if not e['busy']:
+                    del self.entries[key]
+
+
+def check_throttled(buckets, check):
+    """Run check() unless one of the (throttle, key) buckets is paused, counting the result in each.
+    Returns (ok, seconds paused, attempts left)."""
+    taken = []
+    for thr, key in buckets:
+        wait = thr.begin(key)
+        if wait:
+            for t, k in taken:
+                t.release(k)
+            return False, wait, 0
+        taken.append((thr, key))
+    try:
+        ok = bool(check())
+    except BaseException:
+        for t, k in taken:
+            t.failed(k)
+        raise
+    if ok:
+        for t, k in taken:
+            t.passed(k)
+        return True, 0, None
+    results = [t.failed(k) for t, k in taken]
+    return False, max(w for w, _ in results), min(left for _, left in results)
 
 
 # ---------- HTTP ----------
@@ -281,8 +390,8 @@ def next_page(value):
 
 
 def servable(path):
-    """Only the app's own pages, stylesheets and scripts are ever served: never server.py, the accounts
-    file, the README or anything else in the folder."""
+    """Only the app's own pages, stylesheets and scripts are ever served: never server.py, the README or
+    anything else in the folder."""
     if path in ROOT_FILES:
         return True
     if not path.startswith(SERVED_DIRS):
@@ -295,25 +404,40 @@ def servable(path):
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = 'ThreatSim'
     protocol_version = 'HTTP/1.1'
-    timeout = 30   # seconds a connection may sit idle
+    timeout = 30   # seconds a connection may sit idle, or take to send or receive one chunk
 
     def version_string(self):
         return self.server_version
 
+    def parse_request(self):
+        if not super().parse_request():
+            return False
+        if self.request_version == 'HTTP/0.9':   # no headers, so no cookie or origin to check
+            self.close_connection = True
+            return False
+        return True
+
     # ----- request helpers -----
+
+    def header(self, name, default=''):
+        """A request header; safe before the headers are parsed (errors in the request line)."""
+        headers = getattr(self, 'headers', None)
+        value = headers.get(name) if hasattr(headers, 'get') else None
+        return default if value is None else value
 
     def peer_is_proxy(self):
         if not self.server.behind_proxy:
             return False
         try:
-            return ipaddress.ip_address(self.client_address[0]).is_loopback
+            ip = ipaddress.ip_address(self.client_address[0])
         except ValueError:
             return False
+        ip = getattr(ip, 'ipv4_mapped', None) or ip   # ::ffff:127.0.0.1 on a dual-stack socket
+        return ip.is_loopback
 
     def client_addr(self):
         if self.peer_is_proxy():
-            fwd = self.headers.get('X-Forwarded-For', '')
-            last = fwd.split(',')[-1].strip()
+            last = self.header('X-Forwarded-For').split(',')[-1].strip()
             if last:
                 return last
         return self.client_address[0]
@@ -324,16 +448,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def is_https(self):
         if self.server.tls:
             return True
-        return self.peer_is_proxy() and self.headers.get('X-Forwarded-Proto', '').strip().lower() == 'https'
+        return self.peer_is_proxy() and self.header('X-Forwarded-Proto').strip().lower() == 'https'
 
     def public_host(self):
-        if self.peer_is_proxy() and self.headers.get('X-Forwarded-Host'):
-            return self.headers['X-Forwarded-Host'].split(',')[0].strip()
-        return self.headers.get('Host', '')
+        if self.peer_is_proxy() and self.header('X-Forwarded-Host'):
+            return self.header('X-Forwarded-Host').split(',')[0].strip()
+        return self.header('Host')
 
     def same_origin(self):
         """POSTs must come from a page at this server's own address (Origin, else Referer)."""
-        source = self.headers.get('Origin') or self.headers.get('Referer')
+        source = self.header('Origin') or self.header('Referer')
         if not source or source == 'null':
             return False
         u = urllib.parse.urlsplit(source)
@@ -355,11 +479,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return path, urllib.parse.parse_qs(parts.query)
 
     def cookie_name(self):
-        return '__Host-threatsim' if self.is_https() else 'threatsim'
+        # one name per instance (cookies ignore the port), so two servers on one host don't sign each other out
+        port = self.server.server_address[1]
+        return f'__Host-threatsim-{port}' if self.is_https() else f'threatsim-{port}'
 
     def cookie_token(self):
         name = self.cookie_name()
-        for header in self.headers.get_all('Cookie') or []:
+        get_all = getattr(getattr(self, 'headers', None), 'get_all', None)
+        for header in (get_all('Cookie') if get_all else None) or []:
             for piece in header.split(';'):
                 k, _, v = piece.strip().partition('=')
                 if k == name and TOKEN_RE.fullmatch(v):
@@ -384,14 +511,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def read_body(self):
         """The request body as bytes, or None after replying with an error."""
-        if self.headers.get('Transfer-Encoding'):
+        if self.header('Transfer-Encoding'):
             self.close_connection = True
             self.reply(411, 'Send a Content-Length.')
             return None
-        length = self.headers.get('Content-Length')
+        length = self.header('Content-Length', None)
         if length is None:
             return b''   # no length and no chunking: no body
-        if not length.isdigit():
+        if not LENGTH_RE.fullmatch(length.strip()):
             self.close_connection = True
             self.reply(400, 'Bad Content-Length.')
             return None
@@ -404,19 +531,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def form(self, body):
         """Fields from a form-encoded or JSON body: {name: str}."""
-        ctype = self.headers.get('Content-Type', '').split(';')[0].strip().lower()
+        ctype = self.header('Content-Type').split(';')[0].strip().lower()
         try:
             if ctype == 'application/json':
                 data = json.loads(body.decode('utf-8'))
                 return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)} if isinstance(data, dict) else {}
             if ctype == 'application/x-www-form-urlencoded':
                 return {k: v[0] for k, v in urllib.parse.parse_qs(body.decode('utf-8'), keep_blank_values=True).items()}
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError):
             pass
         return {}
 
     def wants_json(self):
-        return 'application/json' in self.headers.get('Accept', '')
+        return 'application/json' in self.header('Accept')
 
     # ----- responses -----
 
@@ -425,7 +552,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('X-Frame-Options', 'DENY')
         self.send_header('Content-Security-Policy', "frame-ancestors 'none'")
         self.send_header('Referrer-Policy', 'same-origin')
-        if self.server.tls:
+        if self.is_https():
             self.send_header('Strict-Transport-Security', 'max-age=31536000')
 
     def reply(self, status, body=b'', ctype='text/plain; charset=utf-8', headers=(), head=False):
@@ -442,7 +569,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         if body and not head and self.command != 'HEAD':
-            self.wfile.write(body)
+            for i in range(0, len(body), WRITE_CHUNK):
+                self.wfile.write(body[i:i + WRITE_CHUNK])
 
     def reply_json(self, status, data, headers=()):
         self.reply(status, json.dumps(data), 'application/json', headers)
@@ -457,8 +585,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return 'Set-Cookie', f'{self.cookie_name()}={token}; {attrs}'
 
     def send_file(self, path, head, session=None, headers=()):
-        full = os.path.realpath(os.path.join(APP_DIR, *path.split('/')))
-        if not full.startswith(ROOT + os.sep) or not os.path.isfile(full):
+        full = os.path.realpath(os.path.join(ROOT, *path.split('/')))
+        # the file itself, not a link to some other file (a link could lead anywhere in or out of the folder)
+        if os.path.relpath(full, ROOT).replace(os.sep, '/') != path or not os.path.isfile(full):
             return self.reply(404, 'Not found.')
         ctype = TYPES[os.path.splitext(path)[1].lower()]
         if path.endswith('.html'):
@@ -475,7 +604,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         st = os.stat(full)
         modified = formatdate(st.st_mtime, usegmt=True)
         cache = [('Cache-Control', 'no-cache' if path in PUBLIC else 'private, no-cache'), ('Last-Modified', modified)]
-        since = self.headers.get('If-Modified-Since')
+        since = self.header('If-Modified-Since')
         if since:
             try:
                 if int(st.st_mtime) <= parsedate_to_datetime(since).timestamp():
@@ -492,6 +621,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.do_GET(head=True)
 
     def do_GET(self, head=False):
+        if self.header('Transfer-Encoding') or self.header('Content-Length', '0').strip() not in ('', '0'):
+            self.close_connection = True   # a body nobody reads: don't let it be taken for the next request
         path, query = self.split_target()
         if path is None:
             return self.reply(400, 'Bad request.')
@@ -549,19 +680,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def post_login(self, fields):
         addr = self.client_addr()
         nxt = next_page(fields.get('next', ''))
-        wait = THROTTLE.wait(addr)
-        if wait:
-            return self.login_failed(429, {'ok': False, 'reason': 'locked', 'wait': wait}, nxt)
         username, password = fields.get('username', ''), fields.get('password', '')
         user, pw = normalize_user(username[:MAX_FIELD * 4]), normalize_password(password[:MAX_FIELD * 4])
         rec = ACCOUNTS.get(user) if user and len(username) <= MAX_FIELD else None
-        if rec and len(pw) <= MAX_FIELD:
-            ok = verify(rec, pw)
-        else:   # an unknown user, or a password too long to be one: take as long as a real check
-            pbkdf2(pw[:MAX_FIELD], DUMMY_SALT, ITERATIONS)
-            ok = False
+
+        def check():
+            if rec and len(pw) <= MAX_FIELD:
+                return verify(rec, pw)
+            pbkdf2(pw[:MAX_FIELD], DUMMY_SALT, ITERATIONS)   # an unknown user, or a password too long to be one: same time
+            return False
+
+        # per username from this address (one person's typos don't pause colleagues behind the same
+        # address), and per address (against trying many usernames)
+        ok, wait, left = check_throttled([(USER_TRIES, (addr, user)), (ADDR_TRIES, addr)], check)
         if ok:
-            THROTTLE.clear(addr)
             old = self.cookie_token()
             if old:
                 SESSIONS.end(old)   # a fresh token for every sign-in
@@ -570,7 +702,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self.wants_json():
                 return self.reply_json(200, {'ok': True, 'next': nxt}, headers=[cookie])
             return self.redirect(nxt, 303, headers=[cookie])
-        wait, left = THROTTLE.fail(addr)
         if wait:
             return self.login_failed(429, {'ok': False, 'reason': 'locked', 'wait': wait}, nxt)
         return self.login_failed(401, {'ok': False, 'reason': 'invalid', 'left': left}, nxt)
@@ -597,12 +728,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         s, reason = self.current_session(touch=True)
         if not s:
             return self.reply_json(401, {'ok': False, 'reason': 'session', 'ended': reason or 'ended'})
-        addr = self.client_addr()
-        wait = THROTTLE.wait(addr)
-        if wait:
-            return self.reply_json(429, {'ok': False, 'reason': 'locked', 'wait': wait,
-                                         'message': f'Too many wrong passwords. Try again in {wait} seconds.'},
-                                   headers=[('Retry-After', str(wait))])
         current = normalize_password(fields.get('current', ''))
         new = normalize_password(fields.get('next', ''))
         confirm = normalize_password(fields.get('confirm', ''))
@@ -611,14 +736,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
         problem = password_problem(s['user'], current, new, confirm)
         if problem:
             return self.reply_json(400, {'ok': False, 'field': problem[0], 'message': problem[1]})
-        if len(current) > MAX_FIELD or not verify(ACCOUNTS.get(s['user']), current):
-            wait, _ = THROTTLE.fail(addr)
+        verified = s['stamp']   # the hash this session was signed in with
+        ok, wait, _ = check_throttled([(PASSWORD_TRIES, s['user'])],
+                                      lambda: len(current) <= MAX_FIELD and verify(ACCOUNTS.get(s['user']), current))
+        if wait:
+            return self.reply_json(429, {'ok': False, 'reason': 'locked', 'wait': wait,
+                                         'message': f'Too many wrong passwords. Try again in {wait} seconds.'},
+                                   headers=[('Retry-After', str(wait))])
+        if not ok:
             return self.reply_json(400, {'ok': False, 'field': 'current', 'message': 'The current password is not right.'})
-        THROTTLE.clear(addr)
         rec = make_record(new)
-        ACCOUNTS.set(s['user'], rec)
-        SESSIONS.restamp(s['token'], rec['hash'])   # this session stays; the user's other sessions end
-        self.reply_json(200, {'ok': True})
+        try:
+            saved = ACCOUNTS.set(s['user'], rec, expect=verified)
+        except OSError as e:
+            log(f'Error: cannot save {ACCOUNTS.path}: {e}')
+            return self.reply_json(500, {'ok': False, 'message': 'The server could not save the new password, so it '
+                                         'was not changed. Tell whoever runs the server.'})
+        if not saved:
+            return self.reply_json(409, {'ok': False, 'message': 'The password was changed somewhere else meanwhile, '
+                                         'so this change was not made.'})
+        # a new token for this browser: the old one, and any copy of it, ends with the old password
+        SESSIONS.end(s['token'], 'password')
+        token = SESSIONS.create(s['user'], rec['hash'])
+        self.reply_json(200, {'ok': True}, headers=[self.session_cookie(token)])
 
 
 class Server(http.server.ThreadingHTTPServer):
@@ -627,14 +767,31 @@ class Server(http.server.ThreadingHTTPServer):
     def __init__(self, addr, tls_context, behind_proxy):
         self.tls = tls_context is not None
         self.behind_proxy = behind_proxy
+        self.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         if ':' in addr[0]:
             self.address_family = socket.AF_INET6
         super().__init__(addr, Handler)
         if tls_context:   # handshakes run in each connection's thread, not in the accept loop
             self.socket = tls_context.wrap_socket(self.socket, server_side=True, do_handshake_on_connect=False)
 
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)   # too many open connections: drop this one
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
     def handle_error(self, request, client_address):
-        if isinstance(sys.exc_info()[1], (ssl.SSLError, OSError)):
+        if isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError, socket.timeout, ssl.SSLError)):
             return   # a client that went away, timed out or didn't speak TLS: not worth a traceback
         super().handle_error(request, client_address)
 
@@ -649,19 +806,22 @@ def set_password(user):
         new = normalize_password(getpass.getpass('New password: '))
         problem = password_problem(user, None, new, normalize_password(getpass.getpass('Repeat it: ')))
         if not problem:
-            ACCOUNTS.set(user, make_record(new))
-            print('Saved. A running server signs this account out of its sessions.')
+            try:
+                ACCOUNTS.set(user, make_record(new))
+            except OSError as e:
+                raise SystemExit(f'Cannot save {ACCOUNTS.path}: {e.strerror or e}. Password not changed.')
+            print(f'Saved in {ACCOUNTS.path}. A running server signs this account out of its sessions.')
             return
         print(problem[1])
     raise SystemExit('Password not changed.')
 
 
 def main():
-    global ACCOUNTS, SESSIONS, THROTTLE, ROOT
+    global ACCOUNTS, SESSIONS, USER_TRIES, ADDR_TRIES, PASSWORD_TRIES, ROOT
     ap = argparse.ArgumentParser(description='Serve ThreatSim and require sign-in.')
     ap.add_argument('--host', default='127.0.0.1', help='address to listen on (default 127.0.0.1; 0.0.0.0 for all)')
     ap.add_argument('--port', type=int, default=8000)
-    ap.add_argument('--data-dir', default=os.path.join(APP_DIR, '.threatsim'), help='where users.json is kept')
+    ap.add_argument('--data-dir', help='where users.json is kept (default ~/.local/share/threatsim)')
     ap.add_argument('--cert', help='TLS certificate (PEM) to serve HTTPS')
     ap.add_argument('--key', help='private key for --cert (PEM)')
     ap.add_argument('--behind-proxy', action='store_true',
@@ -670,11 +830,21 @@ def main():
     args = ap.parse_args()
 
     ROOT = os.path.realpath(APP_DIR)
-    os.makedirs(args.data_dir, mode=0o700, exist_ok=True)
-    ACCOUNTS = Accounts(os.path.join(args.data_dir, 'users.json'))
-    SESSIONS, THROTTLE = Sessions(), Throttle()
+    data_dir = os.path.abspath(args.data_dir or default_data_dir())
+    try:
+        os.makedirs(data_dir, mode=0o700, exist_ok=True)
+        ACCOUNTS = Accounts(os.path.join(data_dir, 'users.json'), create_default=not args.set_password)
+    except OSError as e:
+        raise SystemExit(f'Cannot use the data directory {data_dir}: {e.strerror or e}. Choose another with --data-dir.')
+    SESSIONS = Sessions()
+    USER_TRIES = Throttle(MAX_ATTEMPTS, forget_on_success=True)
+    ADDR_TRIES = Throttle(MAX_ADDR_ATTEMPTS, forget_on_success=False)
+    PASSWORD_TRIES = Throttle(MAX_ATTEMPTS, forget_on_success=True)
     if args.set_password:
         return set_password(args.set_password)
+    if os.path.realpath(data_dir).startswith(ROOT + os.sep):
+        log(f'Warning: the accounts file is inside the app folder ({data_dir}). Move it out and point --data-dir '
+            'at it, so that serving the folder some other way can never publish it.')
 
     ctx = None
     if args.cert or args.key:
@@ -682,17 +852,25 @@ def main():
             raise SystemExit('Give both --cert and --key.')
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-        ctx.load_cert_chain(args.cert, args.key)
-    httpd = Server((args.host, args.port), ctx, args.behind_proxy)
+        try:
+            ctx.load_cert_chain(args.cert, args.key)
+        except (OSError, ssl.SSLError) as e:
+            raise SystemExit(f'Cannot load --cert {args.cert} and --key {args.key}: {getattr(e, "strerror", None) or e}')
+    try:
+        httpd = Server((args.host, args.port), ctx, args.behind_proxy)
+    except OSError as e:   # address in use, no such address, no IPv6 ...
+        raise SystemExit(f'Cannot listen on {args.host} port {args.port}: {e.strerror or e}')
+    port = httpd.server_address[1]
     scheme = 'https' if ctx else 'http'
-    shown = f'[{args.host}]' if ':' in args.host else args.host
-    log(f'ThreatSim on {scheme}://{shown}:{args.port}/  (accounts: {ACCOUNTS.path})')
+    try:
+        ip = ipaddress.ip_address(args.host)
+        local, wildcard = ip.is_loopback, ip.is_unspecified
+    except ValueError:
+        local, wildcard = args.host == 'localhost', False
+    where = 'localhost' if local else "<this computer's address>" if wildcard else f'[{args.host}]' if ':' in args.host else args.host
+    log(f'ThreatSim on {scheme}://{where}:{port}/  (accounts: {ACCOUNTS.path})')
     if ACCOUNTS.default_in_use():
         log(f'Warning: {DEFAULT_USER} still has the default password "{DEFAULT_PASSWORD}". Sign in and change it.')
-    try:
-        local = ipaddress.ip_address(args.host).is_loopback
-    except ValueError:
-        local = args.host == 'localhost'
     if not ctx and not local and not args.behind_proxy:
         log('Warning: serving plain HTTP on a network address: passwords cross the network unencrypted. '
             'Use --cert/--key, or a reverse proxy that serves HTTPS.')
@@ -704,7 +882,7 @@ def main():
         httpd.server_close()
 
 
-ACCOUNTS = SESSIONS = THROTTLE = ROOT = None
+ACCOUNTS = SESSIONS = USER_TRIES = ADDR_TRIES = PASSWORD_TRIES = ROOT = None
 
 if __name__ == '__main__':
     main()
