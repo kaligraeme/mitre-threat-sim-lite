@@ -131,26 +131,133 @@ python3 server.py
 Open http://localhost:8000, sign in (`admin` / `admin` the first time) and change the password. Then
 press **Pull** on the Data page. Needs Python 3.8 or later; nothing to install.
 
-To host it for others:
+Options:
 
-- **Directly, over HTTPS:** `python3 server.py --host 0.0.0.0 --port 8443 --cert cert.pem --key key.pem`.
-  Without `--cert` the server warns you, because plain HTTP on a network sends passwords unencrypted.
-- **Behind a reverse proxy** (nginx, Apache, Caddy) that serves HTTPS: keep the default `--host
-  127.0.0.1` and add `--behind-proxy`, so the server takes the visitor's address and the scheme from
-  the proxy. The proxy must pass on the Host header the browser sent, port included: the server
-  refuses sign-ins whose origin doesn't match it. For nginx:
+| Option | Default | |
+|---|---|---|
+| `--host` | `127.0.0.1` | address to listen on; `0.0.0.0` for every interface |
+| `--port` | `8000` | |
+| `--data-dir` | `.threatsim` beside `server.py` | where `users.json` (the accounts) is kept |
+| `--cert`, `--key` | | serve HTTPS with this certificate and private key (PEM) |
+| `--behind-proxy` | off | take the visitor's address and the scheme from a reverse proxy on the same machine |
+| `--set-password USER` | | set USER's password (creating the account if new), then exit |
 
-  ```nginx
-  location / {
-      proxy_pass http://127.0.0.1:8000;
-      proxy_set_header Host $http_host;
-      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-      proxy_set_header X-Forwarded-Proto $scheme;
-  }
-  ```
+The server is a single process using only the Python standard library. It keeps sessions in memory,
+so restarting it signs everyone out.
 
-Other options: `--port` (default 8000) and `--data-dir` (where `users.json` lives; default `.threatsim`
-beside `server.py`). The server is a single process using only the Python standard library.
+## Hosting
+
+These steps put ThreatSim on a Linux server at `https://threatsim.example.com`. systemd runs it, and
+nginx sits in front of it to handle HTTPS. Use your own names and paths. Any system with Python 3.8
+or later can run `server.py`; only the service and proxy set-up differ.
+
+1. **Install the code, and an account for the service to run as.** The accounts file goes in
+   `/var/lib/threatsim`, away from the code, so updating the code never touches it.
+
+   ```bash
+   sudo git clone https://github.com/kaligraeme/mitre-threat-sim-pro.git /opt/threatsim
+   ```
+
+   ```bash
+   sudo useradd --system --no-create-home --shell /usr/sbin/nologin threatsim
+   ```
+
+   ```bash
+   sudo install -d -o threatsim -g threatsim -m 700 /var/lib/threatsim
+   ```
+
+2. **Set the admin password before the server can be reached**, so `admin` / `admin` never works on
+   the network. Add other accounts the same way, for example `--set-password alice`.
+
+   ```bash
+   sudo -u threatsim python3 /opt/threatsim/server.py --data-dir /var/lib/threatsim --set-password admin
+   ```
+
+3. **Run it as a service.** Create `/etc/systemd/system/threatsim.service`:
+
+   ```ini
+   [Unit]
+   Description=ThreatSim
+   After=network.target
+
+   [Service]
+   User=threatsim
+   ExecStart=/usr/bin/python3 /opt/threatsim/server.py --host 127.0.0.1 --port 8000 --data-dir /var/lib/threatsim --behind-proxy
+   Restart=on-failure
+   NoNewPrivileges=true
+   ProtectSystem=strict
+   ProtectHome=true
+   PrivateTmp=true
+   ReadWritePaths=/var/lib/threatsim
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   Then start it, now and at every boot:
+
+   ```bash
+   sudo systemctl daemon-reload
+   ```
+
+   ```bash
+   sudo systemctl enable --now threatsim
+   ```
+
+   `sudo journalctl -u threatsim` shows its start-up messages and a line for each request.
+
+4. **Put nginx in front for HTTPS.** Get a certificate for the name (for example with certbot), then
+   add a site like this and reload nginx (`sudo nginx -t && sudo systemctl reload nginx`):
+
+   ```nginx
+   server {
+       listen 443 ssl;
+       server_name threatsim.example.com;
+       ssl_certificate     /etc/letsencrypt/live/threatsim.example.com/fullchain.pem;
+       ssl_certificate_key /etc/letsencrypt/live/threatsim.example.com/privkey.pem;
+
+       location / {
+           proxy_pass http://127.0.0.1:8000;
+           proxy_set_header Host $http_host;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
+       }
+   }
+
+   server {
+       listen 80;
+       server_name threatsim.example.com;
+       return 301 https://$host$request_uri;
+   }
+   ```
+
+   The proxy must pass on the Host header that the browser sent, port included. The server refuses
+   any sign-in whose origin doesn't match it. With Apache, use `ProxyPreserveHost On`, `ProxyPass /
+   http://127.0.0.1:8000/` and `RequestHeader set X-Forwarded-Proto "https"`. With Caddy,
+   `reverse_proxy 127.0.0.1:8000` is enough.
+
+5. **Open only the web ports** in the firewall: 443, and 80 for the redirect. The service listens on
+   127.0.0.1, so port 8000 can't be reached from outside anyway.
+
+6. **Sign in** at `https://threatsim.example.com` with the password from step 2, then pull the data on
+   the Data page. Each person's browser downloads the MITRE data itself, from
+   `raw.githubusercontent.com`, so their network must allow that.
+
+**Without a reverse proxy**, ThreatSim can serve HTTPS itself. Run it with `--host 0.0.0.0 --port 443
+--cert /path/fullchain.pem --key /path/privkey.pem`, and add `AmbientCapabilities=CAP_NET_BIND_SERVICE`
+to the service so it can use port 443. It reads the certificate when it starts, so restart it after
+each renewal.
+
+**Looking after it:**
+
+- **Updating:** `sudo git -C /opt/threatsim pull`, then `sudo systemctl restart threatsim`. Restarting
+  signs everyone out.
+- **Back up** `/var/lib/threatsim/users.json`, which holds the accounts.
+- **Forgotten password:** run the step 2 command again. It works while the service is running and ends
+  that account's sessions.
+- **Don't serve the folder any other way.** Don't point a web server's document root (nginx `root`,
+  Apache `DocumentRoot`) or a static file host at it. Anyone could then download the app's files
+  without signing in.
 
 ## How it works
 
