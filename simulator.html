@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ATT&amp;CK and ATLAS Threat Simulator</title>
 <script src="js/auth.js"></script>
-<script>Auth.requireSignIn();</script>
 <link rel="stylesheet" href="css/app.css">
 <style>
   /* ---- data-viz tokens: sequential blue (usage) + status (coverage) ---- */
@@ -116,8 +115,8 @@
   .export-bar { margin-left: auto; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; max-width: 100%; }
   .export-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
   .export-bar button { border: 1px solid var(--border); border-radius: 8px; padding: 5px 10px; font-size: 13px; color: var(--text); white-space: nowrap; }
-  .export-bar button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
-  .export-bar button.primary:hover:not([aria-disabled="true"]) { background: var(--accent); filter: brightness(1.08); }
+  .export-bar button.primary { background: var(--accent-strong); border-color: var(--accent-strong); color: var(--accent-text); font-weight: 600; }
+  .export-bar button.primary:hover:not([aria-disabled="true"]) { background: var(--accent-strong); filter: brightness(1.08); }
   .export-bar button[aria-disabled="true"] { opacity: .65; cursor: progress; }
   .export-status { min-height: 1.4em; max-width: min(460px, 100%); font-size: 12px; color: var(--muted); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .export-status.err { color: var(--err); white-space: normal; }
@@ -232,7 +231,7 @@
   <div class="wrap wide">
     <div class="brand">Threat<span>Sim</span> · ATT&amp;CK · ATLAS</div>
     <nav>
-      <a href="data.html">Data</a>
+      <a href="index.html">Data</a>
       <a href="simulator.html" aria-current="page">Simulator</a>
     </nav>
   </div>
@@ -242,7 +241,7 @@
   <div id="noData" class="card empty-state" hidden>
     <h2>No ATT&amp;CK or ATLAS data stored yet</h2>
     <p>Pull the Enterprise ATT&amp;CK, ICS ATT&amp;CK and ATLAS datasets first, then come back here.</p>
-    <p><a href="data.html">Go to the Data page →</a></p>
+    <p><a href="index.html">Go to the Data page →</a></p>
   </div>
 
   <div id="app" class="sim" hidden>

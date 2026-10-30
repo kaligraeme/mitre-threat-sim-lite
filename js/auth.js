@@ -1,291 +1,129 @@
 /*
- * auth.js — sign-in for ThreatSim (global `Auth`).
+ * auth.js — the signed-in side of ThreatSim's sign-in, for the protected pages (global `Auth`).
  *
- * ThreatSim is a static, browser-only app, so this gates this browser's copy of it; it is not
- * server-side security (anyone with the files or the browser's developer tools can get past it).
- * The password is never stored: only a PBKDF2-HMAC-SHA-256 hash with a random salt.
- *
- * localStorage
- *   threatsim.auth.users     { <username>: { salt, hash, iterations, isDefault, changed } }
- *   threatsim.auth.session   { user, started, expires }
- *   threatsim.auth.attempts  { count, until }   failed sign-ins, for a short lockout
- *
- * Pages: index.html is the sign-in page; protected pages call Auth.requireSignIn() in <head>.
+ * The ThreatSim server (server.py) checks the session on every request and serves these pages,
+ * and their scripts, only to a signed-in user. It adds who that is to the page as
+ * <html data-user data-default-password>. This file adds Change password and Sign out to the
+ * header and the default-password banner, renews the session while the page is in use, and takes
+ * the page to sign-in when the session ends (12 hours without use, or Sign out in another tab).
  */
 (function (global) {
   'use strict';
 
-  const USERS_KEY = 'threatsim.auth.users';
-  const SESSION_KEY = 'threatsim.auth.session';
-  const ATTEMPTS_KEY = 'threatsim.auth.attempts';
-  const DEFAULT_USER = 'admin';
-  const DEFAULT_PASSWORD = 'admin';
-  const ITERATIONS = 310000;          // PBKDF2 rounds for new hashes; each record keeps its own count
-  const SESSION_HOURS = 12;
-  const MAX_ATTEMPTS = 5;             // failed sign-ins before a pause
-  const LOCK_SECONDS = 30;
+  const doc = global.document;
+  const root = doc.documentElement;
+  const SIGN_IN_PAGE = 'login.html';
+  const PAGES = ['index.html', 'simulator.html'];   // pages sign-in may return to
+  const SIGNAL_KEY = 'threatsim.auth.signal';       // tells this browser's other tabs to check the session
   const MIN_PASSWORD = 8;
-  const SIGN_IN_PAGE = 'index.html';
-  const HOME_PAGE = 'data.html';
-  const PAGES = ['data.html', 'simulator.html'];   // pages sign-in may return to
+  const CHECK_MS = 60 * 1000;
+  const RENEW_MS = 5 * 60 * 1000;                   // an active page renews its session at most this often
 
-  // ---------- storage ----------
+  const account = { user: root.dataset.user || '', isDefault: root.dataset.defaultPassword === 'true' };
 
-  function read(key) {
-    try { return JSON.parse(global.localStorage.getItem(key)); } catch (_) { return null; }
+  function hide() {
+    root.style.visibility = 'hidden';
+    if (doc.body) doc.body.inert = true;
   }
-  function write(key, value) {
-    global.localStorage.setItem(key, JSON.stringify(value));   // throws when the browser blocks storage
-  }
-  function remove(key) {
-    try { global.localStorage.removeItem(key); } catch (_) { /* storage unavailable */ }
-  }
-  function storageAvailable() {
-    try {
-      const k = 'threatsim.auth.probe';
-      global.localStorage.setItem(k, '1');
-      global.localStorage.removeItem(k);
-      return true;
-    } catch (_) { return false; }
+  function show() {
+    root.style.visibility = '';
+    if (doc.body) doc.body.inert = false;
   }
 
-  // ---------- hashing ----------
-
-  const utf8 = s => new TextEncoder().encode(s);
-  const toHex = bytes => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
-  const fromHex = s => Uint8Array.from((s.match(/../g) || []).map(h => parseInt(h, 16)));
-
-  /** PBKDF2-HMAC-SHA-256, 32 bytes. WebCrypto where the browser offers it, else the same algorithm in JS. */
-  async function pbkdf2(password, salt, iterations) {
-    const subtle = global.crypto && global.crypto.subtle;
-    if (subtle) {
-      const key = await subtle.importKey('raw', utf8(password), 'PBKDF2', false, ['deriveBits']);
-      return new Uint8Array(await subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, key, 256));
-    }
-    return pbkdf2Js(utf8(password), salt, iterations);
+  /** This page's file name for ?next=, also when the address is / or has no .html. */
+  function thisPage() {
+    let p = global.location.pathname.split('/').pop() || PAGES[0];
+    try { p = decodeURIComponent(p); } catch (_) { /* keep the raw name */ }
+    p = p.toLowerCase();
+    return p.includes('.') ? p : p + '.html';
   }
 
-  // SHA-256 (FIPS 180-4) for pages served over plain http from an address other than localhost,
-  // where browsers withhold crypto.subtle. Gives the same PBKDF2 result as WebCrypto.
-  const K = new Uint32Array([
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-  ]);
-  const IV = new Uint32Array([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]);
-  const W = new Uint32Array(64);
-
-  /** One compression of the block in W[0..15] into state h. */
-  function compress(h) {
-    for (let i = 16; i < 64; i++) {
-      const x = W[i - 15], y = W[i - 2];
-      const s0 = ((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3);
-      const s1 = ((y >>> 17) | (y << 15)) ^ ((y >>> 19) | (y << 13)) ^ (y >>> 10);
-      W[i] = (W[i - 16] + s0 + W[i - 7] + s1) | 0;
-    }
-    let a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], k = h[7];
-    for (let i = 0; i < 64; i++) {
-      const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
-      const t1 = (k + S1 + ((e & f) ^ (~e & g)) + K[i] + W[i]) | 0;
-      const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
-      const t2 = (S0 + ((a & b) ^ (a & c) ^ (b & c))) | 0;
-      k = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
-    }
-    h[0] = (h[0] + a) | 0; h[1] = (h[1] + b) | 0; h[2] = (h[2] + c) | 0; h[3] = (h[3] + d) | 0;
-    h[4] = (h[4] + e) | 0; h[5] = (h[5] + f) | 0; h[6] = (h[6] + g) | 0; h[7] = (h[7] + k) | 0;
-  }
-  const loadBlock = (bytes, off) => {
-    for (let i = 0; i < 16; i++, off += 4) W[i] = (bytes[off] << 24) | (bytes[off + 1] << 16) | (bytes[off + 2] << 8) | bytes[off + 3];
-  };
-  /** SHA-256 of msg continued from `state`, which has already absorbed `prefixLen` bytes (whole blocks). */
-  function finish(state, msg, prefixLen) {
-    const h = Uint32Array.from(state);
-    const len = (msg.length + 9 + 63) & ~63;
-    const buf = new Uint8Array(len);
-    buf.set(msg);
-    buf[msg.length] = 0x80;
-    const bits = (prefixLen + msg.length) * 8;
-    const hi = Math.floor(bits / 0x100000000), lo = bits >>> 0;
-    buf[len - 8] = hi >>> 24; buf[len - 7] = hi >>> 16; buf[len - 6] = hi >>> 8; buf[len - 5] = hi;
-    buf[len - 4] = lo >>> 24; buf[len - 3] = lo >>> 16; buf[len - 2] = lo >>> 8; buf[len - 1] = lo;
-    for (let off = 0; off < len; off += 64) { loadBlock(buf, off); compress(h); }
-    const out = new Uint8Array(32);
-    for (let i = 0; i < 8; i++) { out[4 * i] = h[i] >>> 24; out[4 * i + 1] = h[i] >>> 16; out[4 * i + 2] = h[i] >>> 8; out[4 * i + 3] = h[i]; }
-    return out;
-  }
-  const sha256 = bytes => finish(IV, bytes, 0);
-
-  function pbkdf2Js(password, salt, iterations) {
-    const key = new Uint8Array(64);
-    key.set(password.length > 64 ? sha256(password) : password);
-    const padState = pad => { const h = Uint32Array.from(IV); loadBlock(key.map(b => b ^ pad), 0); compress(h); return h; };
-    const inner = padState(0x36), outer = padState(0x5c);   // HMAC key blocks, absorbed once
-    const hmac = msg => finish(outer, finish(inner, msg, 64), 64);
-    const first = new Uint8Array(salt.length + 4);
-    first.set(salt);
-    first[salt.length + 3] = 1;   // block index 1: 32 bytes need only one block
-    let u = hmac(first);
-    const t = u.slice();
-    for (let i = 1; i < iterations; i++) {
-      u = hmac(u);
-      for (let j = 0; j < 32; j++) t[j] ^= u[j];
-    }
-    return t;
-  }
-
-  const sameBytes = (a, b) => {
-    if (a.length !== b.length) return false;
-    let d = 0;
-    for (let i = 0; i < a.length; i++) d |= a[i] ^ b[i];
-    return d === 0;
-  };
-
-  async function makeRecord(password, isDefault) {
-    const salt = global.crypto.getRandomValues(new Uint8Array(16));
-    const hash = await pbkdf2(password, salt, ITERATIONS);
-    return { salt: toHex(salt), hash: toHex(hash), iterations: ITERATIONS, isDefault, changed: isDefault ? null : new Date().toISOString() };
-  }
-
-  // ---------- accounts ----------
-
-  const normalizeUser = u => String(u || '').trim().toLowerCase();
-  const users = () => read(USERS_KEY);
-
-  /** The account store, created with the default admin / admin account on first use. */
-  async function ensureAccounts() {
-    const existing = users();
-    if (existing && typeof existing === 'object' && Object.keys(existing).length) return existing;
-    const created = { [DEFAULT_USER]: await makeRecord(DEFAULT_PASSWORD, true) };
-    write(USERS_KEY, created);
-    return created;
-  }
-
-  /** True while the default account still has its default password (or no account exists yet). */
-  function usingDefaultPassword() {
-    const u = users();
-    return !u || !Object.keys(u).length || !!(u[DEFAULT_USER] && u[DEFAULT_USER].isDefault);
-  }
-
-  async function verify(rec, password) {
-    const hash = await pbkdf2(password, fromHex(rec.salt), rec.iterations || ITERATIONS);
-    return sameBytes(hash, fromHex(rec.hash));
-  }
-
-  // ---------- sessions ----------
-
-  /** The signed-in session, or null when there is none, it expired, or its account is gone. */
-  function session() {
-    const s = read(SESSION_KEY);
-    const u = users();
-    if (!s || !s.user || !(Date.now() < s.expires) || !u || !u[s.user]) return null;
-    return s;
-  }
-
-  function lockout() {
-    const a = read(ATTEMPTS_KEY) || { count: 0, until: 0 };
-    return a.until > Date.now() ? Math.ceil((a.until - Date.now()) / 1000) : 0;
-  }
-
-  /**
-   * Check a username and password and start a session.
-   * Returns { ok, isDefault } or { ok: false, reason: 'locked' | 'invalid' | 'storage', wait?, left? }.
-   */
-  async function signIn(username, password) {
-    if (!storageAvailable()) return { ok: false, reason: 'storage' };
-    const wait = lockout();
-    if (wait) return { ok: false, reason: 'locked', wait };
-    const all = await ensureAccounts();
-    const user = normalizeUser(username);
-    const rec = Object.prototype.hasOwnProperty.call(all, user) ? all[user] : null;
-    // hash even for an unknown user, so both failures take the same time
-    const ok = rec ? await verify(rec, String(password)) : (await pbkdf2(String(password), new Uint8Array(16), ITERATIONS), false);
-    if (!ok) {
-      const a = read(ATTEMPTS_KEY) || { count: 0, until: 0 };
-      a.count = (a.until > Date.now() ? 0 : a.count) + 1;
-      if (a.count >= MAX_ATTEMPTS) { a.count = 0; a.until = Date.now() + LOCK_SECONDS * 1000; }
-      write(ATTEMPTS_KEY, a);
-      return a.until > Date.now() ? { ok: false, reason: 'locked', wait: LOCK_SECONDS } : { ok: false, reason: 'invalid', left: MAX_ATTEMPTS - a.count };
-    }
-    remove(ATTEMPTS_KEY);
-    const now = Date.now();
-    write(SESSION_KEY, { user, started: now, expires: now + SESSION_HOURS * 3600 * 1000 });
-    return { ok: true, isDefault: !!rec.isDefault };
-  }
-
-  function signOut() {
-    remove(SESSION_KEY);
-    global.location.replace(SIGN_IN_PAGE);
-  }
-
-  /**
-   * Change the signed-in user's password. Returns { ok } or { ok: false, field, message }.
-   * Rules: the current password must match; the new one has at least MIN_PASSWORD characters,
-   * differs from the current one and from the username, and is not the default password.
-   */
-  async function changePassword(current, next, confirm) {
-    const s = session();
-    if (!s) return { ok: false, field: 'current', message: 'Your session has ended. Sign in again.' };
-    const all = users();
-    const rec = all && all[s.user];
-    if (!rec || !(await verify(rec, String(current)))) return { ok: false, field: 'current', message: 'The current password is not right.' };
-    next = String(next);
-    if (next.length < MIN_PASSWORD) return { ok: false, field: 'next', message: `Use at least ${MIN_PASSWORD} characters.` };
-    if (next === String(current)) return { ok: false, field: 'next', message: 'Choose a password different from the current one.' };
-    if (normalizeUser(next) === s.user || next === DEFAULT_PASSWORD) return { ok: false, field: 'next', message: 'Choose a password that is not the username or the default password.' };
-    if (next !== String(confirm)) return { ok: false, field: 'confirm', message: 'The two new passwords do not match.' };
-    all[s.user] = await makeRecord(next, false);
-    write(USERS_KEY, all);
-    return { ok: true };
-  }
-
-  // ---------- page guards ----------
-
-  const thisPage = () => (global.location.pathname.split('/').pop() || SIGN_IN_PAGE);
-
-  /** Where sign-in should go next: a known page from ?next=, else the Data page. Nothing else is accepted. */
-  function nextPage(search = global.location.search) {
-    const next = new URLSearchParams(search).get('next');
-    return PAGES.includes(next) ? next : HOME_PAGE;
-  }
-
-  /** For protected pages, in <head>: send signed-out visitors to the sign-in page, then back here. */
-  function requireSignIn() {
-    if (session()) {
-      watchSession();
-      if (global.document.readyState === 'loading') global.document.addEventListener('DOMContentLoaded', mountAccount);
-      else mountAccount();
-      return true;
-    }
-    // hide the page while the browser leaves it (its own scripts skip their start-up without a session)
-    global.document.documentElement.style.visibility = 'hidden';
+  /** Hide the page and go to sign-in; if the browser stops the redirect, the page stays hidden. */
+  function leave(reason, comeBack = true) {
+    hide();
+    const q = new URLSearchParams();
     const page = thisPage();
-    global.location.replace(SIGN_IN_PAGE + (PAGES.includes(page) ? '?next=' + encodeURIComponent(page) : ''));
-    return false;
+    if (comeBack && PAGES.includes(page) && page !== PAGES[0]) q.set('next', page);
+    if (reason) q.set('ended', reason);
+    const qs = q.toString();
+    global.location.replace(SIGN_IN_PAGE + (qs ? '?' + qs : ''));
   }
 
-  /** For the sign-in page, in <head>: skip it when already signed in. */
-  function redirectIfSignedIn() {
-    if (session()) { global.location.replace(nextPage()); return true; }
-    return false;
+  // Not served by server.py (a plain static server, or opened from disk): there is no sign-in to
+  // check, so don't show the app; the sign-in page explains.
+  if (!account.user) {
+    hide();
+    global.location.replace(SIGN_IN_PAGE + '?problem=server');
+    return;
   }
 
-  /** Leave the page when the session ends in another tab, or expires while it is open. */
+  async function api(path, options) {
+    const res = await global.fetch(path, Object.assign({ credentials: 'same-origin', cache: 'no-store' }, options,
+      { headers: Object.assign({ Accept: 'application/json' }, options && options.headers) }));
+    let body = null;
+    try { body = await res.json(); } catch (_) { /* not JSON */ }
+    return { status: res.status, body: body || {} };
+  }
+
+  const signal = () => { try { global.localStorage.setItem(SIGNAL_KEY, String(Date.now())); } catch (_) { /* storage blocked */ } };
+
+  /**
+   * Ask the server whether the session still stands; leave the page if it has ended. A server that
+   * can't be reached doesn't end the page: the next check tries again. Resolves to true if the page stays.
+   */
+  async function check(renew = false) {
+    let r;
+    try { r = await api('api/session' + (renew ? '?renew=1' : '')); } catch (_) { return true; }
+    if (r.status !== 200) return true;
+    if (r.body.ok === false) {
+      leave(r.body.reason && r.body.reason !== 'none' ? r.body.reason : 'ended');
+      return false;
+    }
+    if (r.body.ok && (r.body.user !== account.user || r.body.defaultPassword !== account.isDefault)) {
+      account.user = r.body.user;
+      account.isDefault = !!r.body.defaultPassword;
+      const who = doc.querySelector('.account .who');
+      if (who) { who.textContent = account.user; who.title = 'Signed in as ' + account.user; }
+      renderDefaultBanner();
+    }
+    return true;
+  }
+
+  let lastRenew = Date.now();   // the server renewed the session when it served this page
+  /** Using the page counts as use of the session: renew it now and then while someone is active. */
+  function renew() {
+    const now = Date.now();
+    if (Math.abs(now - lastRenew) < RENEW_MS) return;
+    lastRenew = now;
+    check(true);
+  }
+
   function watchSession() {
-    const check = () => { if (!session()) global.location.replace(SIGN_IN_PAGE + '?next=' + encodeURIComponent(thisPage())); };
-    global.addEventListener('storage', e => { if (e.key === null || e.key === SESSION_KEY || e.key === USERS_KEY) check(); });
-    global.document.addEventListener('visibilitychange', () => { if (!global.document.hidden) check(); });
-    global.setInterval(check, 60 * 1000);
+    global.addEventListener('storage', e => { if (e.key === SIGNAL_KEY || e.key === null) check(); });
+    doc.addEventListener('visibilitychange', () => { if (!doc.hidden) check(); });
+    // A page kept in the back-forward cache comes back without being served again: hide it on the
+    // way out, and show it again only once the server says the session still stands.
+    global.addEventListener('pagehide', e => { if (e.persisted) hide(); });
+    global.addEventListener('pageshow', e => { if (e.persisted) check().then(stays => { if (stays) show(); }); });
+    global.setInterval(check, CHECK_MS);
+    for (const type of ['pointerdown', 'keydown', 'wheel']) global.addEventListener(type, renew, { capture: true, passive: true });
   }
 
-  // ---------- account controls (protected pages) ----------
+  async function signOut() {
+    let r = null;
+    try { r = await api('logout', { method: 'POST' }); } catch (_) { /* unreachable */ }
+    if (!r || r.status !== 200) {
+      say("Couldn't sign out: the server didn't answer. Try again.");
+      return;
+    }
+    signal();
+    leave('signedout', false);
+  }
+
+  // ---------- account controls ----------
 
   function h(tag, props, ...kids) {
-    const n = global.document.createElement(tag);
+    const n = doc.createElement(tag);
     for (const [k, v] of Object.entries(props || {})) {
       if (v == null) continue;
       if (k === 'text') n.textContent = v;
@@ -297,37 +135,73 @@
   }
 
   let dialog = null;
+  let resetDialog = null;
+  let note = null;        // the header's status line ("Password changed")
+  let noteTimer = 0;
+
+  function say(text) {
+    if (!note) return;
+    global.clearTimeout(noteTimer);
+    note.textContent = text;
+    noteTimer = global.setTimeout(() => { note.textContent = ''; }, 10000);
+  }
+
+  // A held Enter repeats: don't let the repeats reopen the dialog or send the form again.
+  const ignoreHeldEnter = e => { if (e.key === 'Enter' && e.repeat) e.preventDefault(); };
+
+  /** Add the account controls and banner as soon as the header is parsed, before the page first paints. */
+  function mountWhenReady() {
+    const ready = () => { const hd = doc.querySelector('header'); return !!hd && (!!hd.nextElementSibling || doc.readyState !== 'loading'); };
+    if (ready()) { mountAccount(); return; }
+    const mo = new MutationObserver(() => { if (ready()) { mo.disconnect(); mountAccount(); } });
+    mo.observe(root, { childList: true, subtree: true });
+    doc.addEventListener('DOMContentLoaded', () => { mo.disconnect(); mountAccount(); });
+  }
 
   function mountAccount() {
-    const s = session();
-    const header = global.document.querySelector('header .wrap');
-    if (!s || !header || header.querySelector('.account')) return;
+    const header = doc.querySelector('header .wrap');
+    if (!header || header.querySelector('.account')) return;
+    note = h('span', { class: 'account-note', role: 'status' });   // present from the start, so screen readers announce changes
     header.append(h('div', { class: 'account' },
-      h('span', { class: 'who', title: 'Signed in as ' + s.user }, s.user),
-      h('button', { type: 'button', class: 'link', on: { click: openPasswordDialog } }, 'Change password'),
+      h('span', { class: 'who', title: 'Signed in as ' + account.user }, account.user),
+      note,
+      h('button', { type: 'button', class: 'link', id: 'accountPassword', on: { click: openPasswordDialog, keydown: ignoreHeldEnter } }, 'Change password'),
       h('button', { type: 'button', class: 'link', on: { click: signOut } }, 'Sign out')));
     renderDefaultBanner();
   }
 
   function renderDefaultBanner() {
-    const old = global.document.getElementById('authBanner');
+    const header = doc.querySelector('header');
+    if (!header || !header.querySelector('.account')) return;
+    const old = doc.getElementById('authBanner');
+    const hadFocus = !!old && old.contains(doc.activeElement);
     if (old) old.remove();
-    if (!usingDefaultPassword()) return;
-    const header = global.document.querySelector('header');
-    const width = header.querySelector('.wrap').className;   // same width as the page header (the Simulator's is wider)
-    header.after(h('div', { id: 'authBanner', class: 'auth-banner', role: 'status' },
-      h('div', { class: width },
-        h('span', {}, 'You are signed in with the default password (admin). Change it so others with access to this browser cannot sign in as you.'),
-        h('button', { type: 'button', on: { click: openPasswordDialog } }, 'Change password'))));
+    if (account.isDefault) {
+      const width = header.querySelector('.wrap').className;   // same width as the page header (the Simulator's is wider)
+      header.after(h('div', { id: 'authBanner', class: 'auth-banner', role: 'status' },
+        h('div', { class: width },
+          h('span', {}, 'You are signed in with the default password (admin). Change it so that nobody else can sign in with it.'),
+          h('button', { type: 'button', on: { click: openPasswordDialog, keydown: ignoreHeldEnter } }, 'Change password'))));
+    } else if (hadFocus) {
+      const opener = doc.getElementById('accountPassword');
+      if (opener) opener.focus();   // the banner's button had focus and is gone: don't drop focus to the page
+    }
   }
 
   function openPasswordDialog() {
     if (!dialog) dialog = buildDialog();
-    dialog.querySelector('form').reset();
-    dialog.querySelector('.form-error').hidden = true;
-    dialog.querySelectorAll('input').forEach(i => i.removeAttribute('aria-invalid'));
+    if (dialog.open) return;
+    resetDialog();
     dialog.showModal();
-    dialog.querySelector('input').focus();
+    dialog.querySelector('#pwCurrent').focus();
+  }
+
+  /** Quick checks before asking the server, which checks everything again. */
+  function precheck(current, next, confirm) {
+    if (!current) return { field: 'current', message: 'Enter your current password.' };
+    if ([...next.normalize('NFKC')].length < MIN_PASSWORD) return { field: 'next', message: `Use at least ${MIN_PASSWORD} characters.` };
+    if (next !== confirm) return { field: 'confirm', message: 'The two new passwords do not match.' };
+    return null;
   }
 
   function buildDialog() {
@@ -335,59 +209,92 @@
       h('label', { for: id }, label),
       h('input', { id, name: id, type: 'password', autocomplete, required: '' }),
     ];
-    const error = h('p', { class: 'form-error', role: 'alert', hidden: '' });
+    const error = h('p', { id: 'pwError', class: 'form-error', role: 'alert', hidden: '' });
     const submit = h('button', { type: 'submit', class: 'primary' }, 'Change password');
-    const form = h('form', { class: 'auth-form', novalidate: '' },
+    const cancel = h('button', { type: 'button' }, 'Cancel');
+    const form = h('form', { class: 'auth-form', method: 'dialog', novalidate: '' },
       h('h2', { id: 'pwTitle' }, 'Change password'),
+      // for password managers: which saved sign-in this change belongs to
+      h('input', { type: 'text', name: 'username', autocomplete: 'username', value: account.user, readonly: '', hidden: '' }),
       ...field('pwCurrent', 'Current password', 'current-password'),
       ...field('pwNext', `New password (at least ${MIN_PASSWORD} characters)`, 'new-password'),
       ...field('pwConfirm', 'Confirm new password', 'new-password'),
       error,
-      h('div', { class: 'dialog-actions' },
-        h('button', { type: 'button', on: { click: () => d.close() } }, 'Cancel'),
-        submit));
+      h('div', { class: 'dialog-actions' }, cancel, submit));
     const d = h('dialog', { class: 'auth-dialog', 'aria-labelledby': 'pwTitle' }, form);
+    const inputs = { current: form.pwCurrent, next: form.pwNext, confirm: form.pwConfirm };
+    const clearError = () => {
+      error.hidden = true;
+      error.textContent = '';
+      for (const i of Object.values(inputs)) { i.removeAttribute('aria-invalid'); i.removeAttribute('aria-describedby'); }
+    };
+    const showError = (message, fieldName) => {
+      error.textContent = message;
+      error.hidden = false;
+      const input = inputs[fieldName];
+      if (input) {
+        input.setAttribute('aria-invalid', 'true');
+        input.setAttribute('aria-describedby', 'pwError');
+        input.focus();
+      }
+    };
+    let busy = false;
+    resetDialog = () => { for (const i of Object.values(inputs)) i.value = ''; clearError(); };
+    cancel.addEventListener('click', () => d.close());
+    d.addEventListener('cancel', e => { if (busy) e.preventDefault(); });   // Escape while the change is being saved
+    d.addEventListener('keydown', e => { if (e.key === 'Escape') e.stopPropagation(); });   // the dialog handles it, not the page behind
+    form.addEventListener('keydown', ignoreHeldEnter);
     form.addEventListener('submit', async e => {
       e.preventDefault();
-      if (submit.disabled) return;
-      submit.disabled = true;
+      if (busy) return;
+      clearError();
+      const values = { current: inputs.current.value, next: inputs.next.value, confirm: inputs.confirm.value };
+      const problem = precheck(values.current, values.next, values.confirm);
+      if (problem) { showError(problem.message, problem.field); return; }
+      busy = true;
+      submit.disabled = cancel.disabled = true;
       submit.textContent = 'Changing…';
-      error.hidden = true;
-      form.querySelectorAll('input').forEach(i => i.removeAttribute('aria-invalid'));
       try {
-        const r = await changePassword(form.pwCurrent.value, form.pwNext.value, form.pwConfirm.value);
-        if (r.ok) {
-          d.close();
-          renderDefaultBanner();
-          const who = global.document.querySelector('.account .who');
-          if (who) {
-            const note = h('span', { class: 'account-note', role: 'status' }, 'Password changed');
-            who.after(note);
-            global.setTimeout(() => note.remove(), 4000);
-          }
-        } else {
-          error.textContent = r.message;
-          error.hidden = false;
-          const input = { current: form.pwCurrent, next: form.pwNext, confirm: form.pwConfirm }[r.field];
-          if (input) { input.setAttribute('aria-invalid', 'true'); input.focus(); }
+        let r;
+        try {
+          r = await api('api/password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) });
+        } catch (_) {
+          r = { status: 0, body: { message: "The server didn't answer, so the password was not changed. Try again." } };
         }
-      } catch (err) {
-        error.textContent = 'Could not change the password: ' + err.message;
-        error.hidden = false;
+        if (r.status === 200 && r.body.ok) {
+          d.close();
+          resetDialog();
+          account.isDefault = false;
+          renderDefaultBanner();
+          const active = doc.activeElement;
+          if (!active || active === doc.body || d.contains(active)) {
+            const opener = doc.getElementById('accountPassword');
+            if (opener) opener.focus();
+          }
+          say('Password changed');
+          signal();
+        } else if (r.status === 401) {
+          d.close();
+          leave(r.body.ended || 'ended');
+        } else {
+          const message = r.body.message || (r.body.reason === 'origin'
+            ? 'The server refused the request because it did not come from this address. Reload the page and try again.'
+            : 'The password was not changed. Try again.');
+          if (d.open) showError(message, r.body.field);
+          else say('Password not changed: ' + message);
+        }
       } finally {
-        submit.disabled = false;
+        busy = false;
+        submit.disabled = cancel.disabled = false;
         submit.textContent = 'Change password';
       }
     });
-    global.document.body.append(d);
+    doc.body.append(d);
     return d;
   }
 
-  global.Auth = {
-    DEFAULT_USER, MIN_PASSWORD, SESSION_HOURS, MAX_ATTEMPTS, LOCK_SECONDS, PAGES,
-    signIn, signOut, changePassword, session, lockout, usingDefaultPassword, storageAvailable,
-    requireSignIn, redirectIfSignedIn, nextPage,
-    // exposed for tests: the hashing primitives
-    _pbkdf2: pbkdf2, _pbkdf2Js: pbkdf2Js, _sha256: sha256,
-  };
+  watchSession();
+  mountWhenReady();
+
+  global.Auth = { user: () => account.user, check, signOut };
 })(window);

@@ -7,30 +7,37 @@ Software, to the techniques they use, then to the relevant mitigations and detec
 
 ## Pages
 
-- **Sign in** (`index.html`): the landing page. The other pages send you here until you sign in.
-- **Data** (`data.html`): pull MITRE ATT&CK and ATLAS releases into the local database.
+- **Sign in** (`login.html`): the only page anyone can open without signing in.
+- **Data** (`index.html`): pull MITRE ATT&CK and ATLAS releases into the local database.
 - **Simulator** (`simulator.html`): build a threat profile and map it to mitigations and detections.
 
 ## Sign-in
 
-ThreatSim opens on a sign-in page. The first time, sign in with username `admin` and password `admin`.
-Until you change that password, a banner on every page asks you to: use **Change password** in the
-header (at least 8 characters, and not `admin` or the username). **Sign out** signs you out in every tab
-of this browser, and a session ends by itself after 12 hours. After five wrong passwords in a row,
-sign-in pauses for 30 seconds.
+ThreatSim runs behind its own small server, `server.py`, which checks the session on every request.
+Until you sign in it serves only the sign-in page and the stylesheet and script that page needs. The
+Data page, the Simulator and all their scripts are refused: pages redirect to sign-in, anything else
+gets 401. Run it as described under [Run](#run). Serving the folder with any other web server would
+leave the app open to anyone, so the pages then refuse to start and the sign-in page says why.
 
-ThreatSim never stores the password itself, only a PBKDF2-SHA-256 hash of it (310,000 iterations, random
-salt). The hash, the session and the count of failed attempts are kept in this browser's localStorage.
+- **First sign-in:** username `admin`, password `admin`. Until that password is changed, the server
+  warns when it starts and every page shows a banner. **Change password** is in the page header. The
+  new password needs at least 8 characters and can't be the current one, the username or `admin`.
+  Changing it ends that account's sessions in other browsers.
+- **Sessions** are a random token in an HttpOnly cookie (SameSite=Lax, and Secure over HTTPS), kept in
+  the server's memory. A session ends after 12 hours without use, or when you sign out, which also
+  takes this browser's other ThreatSim tabs to the sign-in page. It also ends when the password is
+  changed elsewhere, or when the server restarts.
+- **Failed sign-ins:** after five wrong passwords from one address, sign-in from it pauses for 30
+  seconds. Each further pause within the hour doubles, up to 15 minutes.
+- **Passwords** are stored only as PBKDF2-HMAC-SHA-256 hashes (310,000 iterations, random salt) in
+  `.threatsim/users.json` (mode 600). The server never serves that file, `server.py` or anything else
+  outside the app's pages, `css/` and `js/`.
+- **Forgotten password, or another account:** `python3 server.py --set-password admin` (or a new
+  username) asks for a new password. You can run it while the server is running; that account's
+  sessions end.
 
-**Forgotten password:** in the browser's developer tools, remove the `threatsim.auth.users` key from this
-site's local storage (or run `localStorage.removeItem('threatsim.auth.users')` in the console). The next
-sign-in recreates `admin` / `admin`. Clearing the site's data does the same, but also deletes the MITRE
-data you pulled.
-
-**What sign-in protects:** it keeps other people who use this browser out of this copy of ThreatSim. It
-is not server-side security. ThreatSim is static files that run in the browser, so anyone with the files,
-or with the browser's developer tools, can get past it. To control who can reach a hosted copy, use your
-web server's or hosting provider's access control.
+Your browser downloads the MITRE data straight from GitHub and keeps it in its own database
+(IndexedDB), as before. The server only serves the app.
 
 ## Simulator
 
@@ -118,12 +125,32 @@ export. ATLAS YAML is parsed with [js-yaml](https://github.com/nodeca/js-yaml) 4
 
 ```bash
 cd mitre-threat-sim-pro
-python3 -m http.server 8000
+python3 server.py
 ```
 
-Open http://localhost:8000, sign in (`admin` / `admin` the first time), then press **Pull** on the Data
-page. Opening `index.html` directly from disk also works, but serving it keeps the database on one
-origin for every page you add later.
+Open http://localhost:8000, sign in (`admin` / `admin` the first time) and change the password. Then
+press **Pull** on the Data page. Needs Python 3.8 or later; nothing to install.
+
+To host it for others:
+
+- **Directly, over HTTPS:** `python3 server.py --host 0.0.0.0 --port 8443 --cert cert.pem --key key.pem`.
+  Without `--cert` the server warns you, because plain HTTP on a network sends passwords unencrypted.
+- **Behind a reverse proxy** (nginx, Apache, Caddy) that serves HTTPS: keep the default `--host
+  127.0.0.1` and add `--behind-proxy`, so the server takes the visitor's address and the scheme from
+  the proxy. The proxy must pass on the Host header the browser sent, port included: the server
+  refuses sign-ins whose origin doesn't match it. For nginx:
+
+  ```nginx
+  location / {
+      proxy_pass http://127.0.0.1:8000;
+      proxy_set_header Host $http_host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+  }
+  ```
+
+Other options: `--port` (default 8000) and `--data-dir` (where `users.json` lives; default `.threatsim`
+beside `server.py`). The server is a single process using only the Python standard library.
 
 ## How it works
 

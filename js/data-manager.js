@@ -445,7 +445,6 @@
   // ---------- boot ----------
 
   async function init() {
-    if (window.Auth && !Auth.session()) return;   // signed out: auth.js is sending this page to sign-in
     renderSearchFilters();
     $('#pullBtn').addEventListener('click', pull);
     $('#checkBtn').addEventListener('click', checkUpstream);

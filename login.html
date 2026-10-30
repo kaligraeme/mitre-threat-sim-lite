@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · ThreatSim</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div class="brand">Threat<span>Sim</span> · ATT&amp;CK · ATLAS</div>
+  </div>
+</header>
+
+<main class="wrap signin">
+  <section class="card signin-card" aria-labelledby="signInTitle">
+    <h1 id="signInTitle">Sign in</h1>
+    <p class="sub">Threat simulator for MITRE ATT&amp;CK and ATLAS.</p>
+    <p id="signInStatus" class="form-status" role="status"></p>
+    <form id="signInForm" class="auth-form" method="post" action="login" novalidate>
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false" required>
+      <label class="chk"><input type="checkbox" id="showPassword" autocomplete="off"> Show password</label>
+      <p id="signInError" class="form-error" role="alert" hidden></p>
+      <button id="signInButton" class="primary" type="submit" disabled>Sign in</button>
+    </form>
+    <noscript><p class="form-error">ThreatSim needs JavaScript.</p></noscript>
+  </section>
+  <p class="signin-note">
+    The ThreatSim server lets only signed-in users open the Data and Simulator pages. The MITRE data you
+    pull is kept in your own browser.
+  </p>
+</main>
+
+<footer>
+  <div class="wrap">
+    MITRE ATT&amp;CK® data © The MITRE Corporation, used under the ATT&amp;CK Terms of Use.
+    MITRE ATLAS™ data © The MITRE Corporation, used under the Apache License 2.0.
+  </div>
+</footer>
+
+<script src="js/login.js"></script>
+</body>
+</html>

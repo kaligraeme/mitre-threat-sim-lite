@@ -7,7 +7,9 @@
   --text: #1b1f24;
   --muted: #5b6573;
   --accent: #c4261d;
+  --accent-strong: #c4261d;  /* filled buttons: white text stays above 4.5:1 */
   --accent-text: #ffffff;
+  --field-border: #8a94a3;   /* form fields: 3:1 against the surface */
   --ok: #1f7a4a;
   --warn: #a35a00;
   --err: #b3261e;
@@ -23,7 +25,9 @@
     --text: #e6e9ee;
     --muted: #94a0b0;
     --accent: #e5483e;
+    --accent-strong: #c9372d;
     --accent-text: #ffffff;
+    --field-border: #6b7685;
     --ok: #4cc38a;
     --warn: #e0a447;
     --err: #ff6b62;
@@ -32,7 +36,8 @@
 }
 :root[data-theme="dark"] {
   --bg: #0e1116; --surface: #161b22; --surface-2: #1f262f; --border: #2d3540;
-  --text: #e6e9ee; --muted: #94a0b0; --accent: #e5483e; --accent-text: #ffffff;
+  --text: #e6e9ee; --muted: #94a0b0; --accent: #e5483e; --accent-strong: #c9372d; --accent-text: #ffffff;
+  --field-border: #6b7685;
   --ok: #4cc38a; --warn: #e0a447; --err: #ff6b62; --bar: #e5483e;
 }
 
@@ -69,10 +74,10 @@ button {
 button:hover:not(:disabled) { background: var(--surface-2); }
 button:disabled { opacity: .5; cursor: not-allowed; }
 button.primary {
-  background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600;
+  background: var(--accent-strong); border-color: var(--accent-strong); color: var(--accent-text); font-weight: 600;
   padding: 10px 22px;
 }
-button.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); }
+button.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent-strong); }
 button.link { border: none; background: none; color: var(--muted); padding: 4px 6px; text-decoration: underline; }
 label.chk { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); font-size: 14px; }
 .status-line { color: var(--muted); font-size: 14px; }
@@ -124,14 +129,14 @@ a { color: var(--accent); }
 .empty { color: var(--muted); font-size: 14px; padding: 8px 0; }
 footer { color: var(--muted); font-size: 12px; padding: 24px 0; border-top: 1px solid var(--border); }
 
-/* ---------- sign-in (index.html) ---------- */
+/* ---------- sign-in (login.html) ---------- */
 main.signin { display: flex; flex-direction: column; align-items: center; padding-top: 56px; }
 .signin-card { width: min(380px, 100%); padding: 24px; }
 .signin-card .sub { margin-bottom: 12px; }
 .auth-form { display: flex; flex-direction: column; gap: 6px; }
 .auth-form label:not(.chk) { font-size: 14px; font-weight: 600; margin-top: 8px; }
 .auth-form input:not([type="checkbox"]) {
-  font: inherit; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--border);
+  font: inherit; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--field-border);
   background: var(--surface); color: var(--text); width: 100%;
 }
 .auth-form input[aria-invalid="true"] { border-color: var(--err); }
@@ -139,13 +144,15 @@ main.signin { display: flex; flex-direction: column; align-items: center; paddin
 .auth-form button.primary { margin-top: 14px; }
 .auth-form h2 { margin-bottom: 4px; }
 .form-error { color: var(--err); font-size: 14px; margin: 8px 0 0; }
-.signin-hint { font-size: 13px; color: var(--muted); margin: 16px 0 0; padding-top: 12px; border-top: 1px solid var(--border); }
+.form-status { font-size: 14px; margin: 0 0 8px; }
+.form-status:empty { margin: 0; }
 .signin-note { font-size: 12.5px; color: var(--muted); max-width: 380px; text-align: center; margin: 16px 0 0; }
 
 /* ---------- account controls on signed-in pages ---------- */
 .account { display: flex; align-items: center; gap: 2px; font-size: 14px; flex-wrap: wrap; }
 .account .who { font-weight: 600; padding: 0 6px; }
 .account .account-note { color: var(--ok); font-size: 13px; padding: 0 6px; }
+.account .account-note:empty { padding: 0; }
 .account button.link { font-size: 14px; }
 .auth-banner { background: color-mix(in srgb, var(--warn) 14%, var(--surface)); border-bottom: 1px solid var(--border); }
 .auth-banner .wrap { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding-top: 8px; padding-bottom: 8px; font-size: 14px; }
@@ -157,3 +164,4 @@ main.signin { display: flex; flex-direction: column; align-items: center; paddin
 .auth-dialog::backdrop { background: rgba(0, 0, 0, .45); }
 .auth-dialog .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .auth-dialog .dialog-actions button.primary { margin-top: 0; }
+@media print { .account, .auth-banner { display: none; } }
