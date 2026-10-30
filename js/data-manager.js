@@ -82,6 +82,9 @@
     return meta.version !== target.version;
   }
 
+  /** Selected domains whose release list could not be read, so their status is unknown. */
+  const unchecked = () => AttackDB.DOMAINS.filter(d => state.selected.has(d.id) && state.upstream && !state.upstream.domains[d.id]);
+
   function pullPlan() {
     const force = $('#forceChk').checked;
     return AttackDB.DOMAINS
@@ -161,7 +164,7 @@
     btn.disabled = state.busy || !state.upstream || plan.length === 0;
     if (state.busy) btn.textContent = 'Pulling…';
     else if (!state.upstream) btn.textContent = 'Pull';
-    else if (plan.length === 0) btn.textContent = 'Pull (up to date)';
+    else if (plan.length === 0) btn.textContent = unchecked().length ? 'Pull' : 'Pull (up to date)';
     else btn.textContent = 'Pull ' + plan.map(id => AttackDB.DOMAINS.find(d => d.id === id).label).join(' + ');
     $('#checkBtn').disabled = state.busy;
     $('#clearBtn').disabled = state.busy;
@@ -276,14 +279,17 @@
     try {
       state.upstream = await AttackDB.fetchUpstreamIndex();
       const outdated = AttackDB.DOMAINS.filter(d => state.selected.has(d.id) && needsPull(d.id));
+      const unknown = unchecked();
       const failed = Object.entries(state.upstream.errors || {})
-        .map(([fam, msg]) => 'Could not reach the ' + AttackDB.FAMILIES[fam].name + ' release list (' + msg + ').');
-      setGlobal([outdated.length
-        ? 'New data available for ' + outdated.map(d => d.label).join(', ') + '.'
-        : 'Checked ' + fmtDate(new Date().toISOString()) + ' — everything selected is current.', ...failed].join(' '),
+        .map(([fam, msg]) => 'Could not read the ' + AttackDB.FAMILIES[fam].name + ' release list (' + msg + ').');
+      setGlobal([outdated.length ? 'New data available for ' + outdated.map(d => d.label).join(', ') + '.'
+        : unknown.length ? 'Checked ' + fmtDate(new Date().toISOString()) + '.'
+          : 'Checked ' + fmtDate(new Date().toISOString()) + ' — everything selected is current.',
+        unknown.length ? unknown.map(d => d.label).join(', ') + ' could not be checked.' : '',
+        ...failed].filter(Boolean).join(' '),
         failed.length ? 'err' : outdated.length ? 'warn' : 'ok');
     } catch (e) {
-      setGlobal('Could not reach the MITRE release lists: ' + e.message, 'err');
+      setGlobal('Could not read the MITRE release lists: ' + e.message, 'err');
     }
     renderCards();
     renderToolbar();

@@ -188,6 +188,8 @@
   const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
 
   const KB_NAMES = { attack: 'ATT&CK', atlas: 'ATLAS' };
+  /** How a procedure path names the campaign or case study it passes through (as the dashboard does). */
+  const VIA_PREFIX = { campaign: 'campaign ', 'case-study': 'case study ' };
   /** The knowledge bases a workbook covers: 'ATT&CK', 'ATLAS' or 'ATT&CK and ATLAS'. */
   const kbList = P => [...new Set(P.domains.map(D => D.kb))].join(' and ') || 'ATT&CK';
   const workbookTitle = P => kbList(P) + ' threat readiness workpaper';
@@ -232,13 +234,22 @@
   function plain(md) {
     if (!md) return '';
     const spans = [];
+    const keep = c => '\u0001' + (spans.push(c) - 1) + '\u0002';   // code is kept as written
     const t = decodeEntities(String(md)
+      .replace(/```[^\n`]*\n?([\s\S]*?)```/g, (_, c) => keep(c.trim().replace(/\s*\n\s*/g, ' ')))   // ATLAS code fences
       .replace(/\s*\(Citation:[^)]*\)/g, '')
-      .replace(/\[\[[^\]]*\]\]/g, '')
-      .replace(/\[([^\]]+)\]\((?:https?:\/\/|\/)[^)\s]*\)/g, '$1')
+      .replace(/\[\[[^\]]*\]\](\(\s*[^)\s]*\s*\))?/g, '')
+      // links (also ATLAS's with spaces, empty targets, or site-relative paths) become their text
+      .replace(/\[([^\]]+)\]\(\s*(?:(?:https?:\/\/|\/)[^)\s]*|(?:tactics|techniques|mitigations|studies|entities|software)\/[^)\s]*)?\s*\)/g, '$1')
       .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<\/?code>/gi, '')
-      .replace(/`([^`]+)`/g, (_, c) => '\u0001' + (spans.push(c) - 1) + '\u0002')
+      .replace(/`([^`]+)`/g, (_, c) => keep(c))
+      // ATLAS presentational wrappers: the tags go, their text stays (placeholders like <profile_name> stay too)
+      .replace(/<\/?(?:atlas-[a-z-]+|div|span|sup)(?:\s[^>]*)?>/gi, '')
+      // ATLAS markdown tables: rule rows go, each row's cells are joined
+      .replace(/^[ \t]*\|?(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*(?::?-+:?)?[ \t]*$/gm, '')
+      .replace(/^[ \t]*\|(.*)\|[ \t]*$/gm, (_, r) => r.split('|').map(c => c.trim()).filter(Boolean).join(', ') + ';')
+      .replace(/^[ \t]*>[ \t]?/gm, '')
       .replace(/^#{1,6}[ \t]+/gm, '')
       .replace(/\*\*([^*]+)\*\*/g, '$1')
       .replace(/(^|[\s(])\*(?=[^\s*])([^*\n]*?[^\s*\\])\*(?=$|[\s.,;:!?)])/gm, '$1$2')
@@ -344,7 +355,7 @@
       for (const id of r.detections.keys()) if (detOn(id)) D.detOn++;
       P.domains.push(D);
 
-      const viaText = via => via.map(id => { const o = lookup(id); return (o && o.kind === 'campaign' ? 'campaign ' : '') + name(id); }).join(' → ');
+      const viaText = via => via.map(id => { const o = lookup(id); return ((o && VIA_PREFIX[o.kind]) || '') + name(id); }).join(' → ');
 
       // Techniques: most-used first, then by ID.
       techList.sort((a, b) => b.roots.size - a.roots.size || byAttackId(a.tech, b.tech));
@@ -533,7 +544,15 @@
     });
 
     // Threat profile: every selected adversary, with the techniques it contributes.
-    const kindLabel = (kind, o) => (o.softwareType === 'malware' ? 'Malware' : o.softwareType === 'tool' ? 'Tool' : kind.one);
+    // Type: Malware / Tool for software; ATLAS case studies add Incident or Exercise; ATLAS case studies and entities
+    // add the activity purpose ATLAS records (identity does not imply intent: many entities are security evaluators)
+    const kindLabel = (kind, o) => {
+      if (o.softwareType === 'malware') return 'Malware';
+      if (o.softwareType === 'tool') return 'Tool';
+      const purposes = ctx.activityPurposes ? ctx.activityPurposes(o) : [];
+      const detail = [o.kind === 'case-study' ? o.caseType : null, ...purposes].filter(Boolean);
+      return kind.one + (detail.length ? ` (${detail.join(', ')})` : '');
+    };
     for (const kind of ctx.kinds) {
       for (const id of ctx.selection[kind.key]) {
         const o = ctx.entity(id);
@@ -791,11 +810,12 @@
       if (!groups.has(s)) groups.set(s, []);
       groups.get(s).push(c);
     }
-    put(ws, 3, 2, 'Shade = adversaries using it:', { font: font({ bold: true }) });
+    const who = D.family === 'atlas' ? ['threat', 'threats'] : ['adversary', 'adversaries'];
+    put(ws, 3, 2, `Shade = ${who[1]} using it:`, { font: font({ bold: true }) });
     let lc = 4;
     for (const [s, counts] of groups) {
       const lo = counts[0], hi = counts[counts.length - 1];
-      put(ws, 3, lc, (lo === hi ? lo : lo + '–' + hi) + (hi === 1 ? ' adversary' : ' adversaries'), {
+      put(ws, 3, lc, (lo === hi ? lo : lo + '–' + hi) + ' ' + (hi === 1 ? who[0] : who[1]), {
         font: font({ color: { argb: SEQ[s - 1][1] }, bold: true }), fill: solid(SEQ[s - 1][0]), alignment: { horizontal: 'center' },
         border: box(C.white),
       });
@@ -997,11 +1017,16 @@
     const when = P.generated.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
     text(row, 1, clean(`Generated ${when} with ThreatSim · ` + P.domains.map(D => `${D.title} v${D.version}`).join(' · ')), { color: { argb: C.muted } });
     row += 2;
-    merged(row, 1, 8, 'How to use this workpaper: set each mitigation\'s Implementation status (In Place / Not In Place) on the Mitigations sheet, '
-      + 'and each detection strategy\'s Deployment status (Deployed / Not Deployed) on the Detections sheet, using the yellow drop-down cells '
-      + '(they turn green when In Place or Deployed). Figures marked (live) and every readiness bar recalculate from those choices; '
-      + 'figures marked (at export) were fixed when the workpaper was exported.',
-    { font: font({ bold: true, color: { argb: C.warnInk } }), fill: solid(C.input), alignment: { wrapText: true, vertical: 'middle' }, border: box(C.inputBorder) }, 62);
+    // name only the sheets that have statuses to set (an ATLAS-only profile has no detection strategies)
+    const hasDet = P.detections.length > 0;
+    const howTo = 'How to use this workpaper: set each mitigation\'s Implementation status (In Place / Not In Place) on the Mitigations sheet'
+      + (hasDet ? ', and each detection strategy\'s Deployment status (Deployed / Not Deployed) on the Detections sheet,' : ',')
+      + ' using the yellow drop-down cells (they turn green when ' + (hasDet ? 'In Place or Deployed' : 'In Place') + '). '
+      + (P.domains.some(D => D.family === 'atlas') ? 'ATLAS has no detection strategies; its detection controls are ATLAS mitigations. ' : '')
+      + 'Figures marked (live) and every readiness bar recalculate from those choices; '
+      + 'figures marked (at export) were fixed when the workpaper was exported.';
+    merged(row, 1, 8, howTo, { font: font({ bold: true, color: { argb: C.warnInk } }), fill: solid(C.input), alignment: { wrapText: true, vertical: 'middle' },
+      border: box(C.inputBorder) }, Math.max(62, 15 * lines(howTo, 118) + 6));
     row += 2;
 
     // ---- Readiness (live) ----
@@ -1106,7 +1131,7 @@
         const noun = isMit ? 'mitigation' : 'detection strategy', nouns = isMit ? 'mitigations' : 'detection strategies';
         if (!list.length) {
           const off = total - on;
-          note(!total ? (!isMit && D.family === 'atlas' ? `${D.label}: detection strategies are not part of ATLAS, so its techniques can only be mitigated.`
+          note(!total ? (!isMit && D.family === 'atlas' ? `${D.label}: ATLAS has no detection strategies; its detection controls are ATLAS mitigations, listed above.`
             : `${D.label}: no ${D.kb} ${nouns} map to this profile's techniques.`)
             : on === total ? (total === 1 ? `${D.label}: the only ${noun} was already ${V.on} at export.` : `${D.label}: all ${total} ${nouns} were already ${V.on} at export.`)
             : isMit ? `${D.label}: the ${plural(off, noun, nouns)} not ${V.on} at export ${off === 1 ? 'addresses' : 'address'} no technique that is still unmitigated.`
@@ -1177,11 +1202,11 @@
       ['Techniques in scope', totalTech, `${plural(sum('subs'), 'sub-technique', 'sub-techniques')} · ${sum('tacticsHit')} of ${sum('tacticsAll')} tactics`],
       ['Techniques with no mitigation', sum('noMitigation'),
         (P.domains.length > 1 ? P.domains.map(D => `${D.noMitigation} ${D.label}`).join(', ') + '. ' : '')
-        + (!hasAttack ? 'ATLAS defines no detection strategies either, so these stay uncovered here.'
-          : hasAtlas ? 'Detection is the only lever for the ATT&CK ones; ATLAS defines no detection strategies.' : 'Detection is the only lever for these.')],
+        + (!hasAttack ? 'ATLAS has no detection strategies either, so these stay uncovered here.'
+          : hasAtlas ? 'Detection is the only lever for the ATT&CK ones; ATLAS has no detection strategies.' : 'Detection is the only lever for these.')],
       ['Mitigations mapped', sum('mitTotal'), `${kbList(P)} mitigations that address at least one profile technique`],
-      ['Detection strategies mapped', sum('detTotal'), hasAttack ? 'ATT&CK detection strategies for the profile techniques' + (hasAtlas ? ' (ATLAS defines none)' : '')
-        : 'ATLAS defines no detection strategies'],
+      ['Detection strategies mapped', sum('detTotal'), hasAttack ? 'ATT&CK detection strategies for the profile techniques' + (hasAtlas ? ' (ATLAS has none: its detection controls are mitigations)' : '')
+        : 'ATLAS has no detection strategies; its detection controls are mitigations'],
       ['Data components (telemetry)', P.dataComponents, 'Distinct log data types the detection strategies rely on'
         + (P.dcShared > 0 ? ` (${P.dcShared} ${P.dcShared === 1 ? 'is' : 'are'} used by more than one domain and get a Telemetry row in each: ${sum('dcTotal')} rows)` : '')],
     ];
@@ -1205,13 +1230,15 @@
     headerRow(['Threat', 'Type', 'ID', 'Domains', 'Techniques contributed', 'Aliases']);
     for (const p of P.profile) {
       const top = { vertical: 'top' };
-      put(ws, row, 1, link(p.obj.name, p.obj.url), { font: font({ color: { argb: C.link }, underline: true }), alignment: top });
-      put(ws, row, 2, p.kind, { font: font(), alignment: top });
+      put(ws, row, 1, link(p.obj.name, p.obj.url), { font: font({ color: { argb: C.link }, underline: true }), alignment: { vertical: 'top', wrapText: true } });
+      put(ws, row, 2, p.kind, { font: font(), alignment: { vertical: 'top', wrapText: true } });
       put(ws, row, 3, p.obj.attackId || '', { font: font(), alignment: top });
       put(ws, row, 4, p.domains, { font: font(), alignment: { vertical: 'top', wrapText: true } });
       put(ws, row, 5, p.techniques, { font: font(), alignment: center });
       const aliases = clean(p.aliases);
-      merged(row, 6, 8, aliases || null, { font: font({ color: { argb: C.muted } }), alignment: { wrapText: true, vertical: 'top' } }, 13 * lines(aliases, 40) + 3);
+      // column A holds ~42 characters a line, B ~13; ATLAS case-study names are long
+      merged(row, 6, 8, aliases || null, { font: font({ color: { argb: C.muted } }), alignment: { wrapText: true, vertical: 'top' } },
+        13 * Math.max(lines(aliases, 40), lines(p.obj.name, 42), lines(p.kind, 13)) + 3);
       row++;
     }
     row++;
@@ -1229,6 +1256,7 @@
     const year = P.domains.filter(D => D.family === 'attack').reduce((y, D) => Math.max(y, yearOf(D)), 0) || P.generated.getFullYear();
     const atlasYear = P.domains.filter(D => D.family === 'atlas').reduce((y, D) => Math.max(y, yearOf(D)), 0) || P.generated.getFullYear();
     const attributed = [hasAttackKb ? 'campaigns attributed to selected groups' : null, hasAtlasKb ? 'case studies attributed to selected entities' : null].filter(Boolean).join(' and ');
+    const who = hasAtlasKb ? 'threats' : 'adversaries';
     const method = [
       ['Data', P.domains.map(D => `${D.title} v${D.version}` + (D.released ? ` (released ${fmtDay(D.released)})` : '')).join('; ')],
       ['Scope', `Techniques used by the selected threats. Software they use: ${opts.viaSoftware ? 'included' : 'not included'}. `
@@ -1236,19 +1264,20 @@
       ['Readiness', 'Share of profile techniques with at least one mitigation In Place or detection strategy Deployed. Fully covered means both. Partial means one of the two.'],
       ['Coverage', 'A technique is mitigated when any mitigation mapped to it on the Control Map sheet is In Place, and detected when any detection strategy mapped to it is Deployed.'],
       ['(live) and (at export)', 'Figures marked (live) are formulas that recalculate when you change a status. Figures marked (at export), including priorities, were fixed when ThreatSim exported this workbook. "Status at export" keeps the original statuses, and "Changed since export" flags the rows you have edited.'],
-      ['Priority', 'Ranked by ThreatSim at export: each step picks the control covering the most still-uncovered techniques, weighting techniques used by more selected adversaries higher. The weighted score is the sum, over the techniques a pick newly covers, of the number of selected adversaries using each. Controls with equal scores share a priority number and are listed by reach, documented procedure examples, then ID. Adds is how many techniques a pick newly covers; Cumulative is the share covered once it is added. To re-rank after editing statuses here, set the same statuses in ThreatSim and export again (owners, dates and notes are not carried over).'],
+      ['Priority', `Ranked by ThreatSim at export: each step picks the control covering the most still-uncovered techniques, weighting techniques used by more selected ${who} higher. The weighted score is the sum, over the techniques a pick newly covers, of the number of selected ${who} using each.`
+        + ' Controls with equal scores share a priority number and are listed by reach, documented procedure examples, then ID. Adds is how many techniques a pick newly covers; Cumulative is the share covered once it is added. To re-rank after editing statuses here, set the same statuses in ThreatSim and export again (owners, dates and notes are not carried over).'],
       ['Sheets', 'Matrix: techniques by tactic, shaded by usage, with a live status column. Techniques: every profile technique with live coverage. '
         + 'Mitigations and Detections: set statuses here (yellow drop-downs), with owner, target date and notes. ICS Assets: assets targeted by ICS techniques and how exposed they are. '
         + 'Telemetry: data components and log sources the detection strategies rely on. Analytics: every analytic and what to look for in each log source. '
         + 'Control Map: each technique-to-control link the coverage formulas use.'],
       ['Limits', `${kbList(P)} ${hasAttackKb && hasAtlasKb ? 'do' : 'does'} not enumerate every adversary behaviour, and some techniques have no mitigation. `
-        + (hasAtlasKb ? 'ATLAS defines no detection strategies, so ATLAS techniques can be mitigated but not detected here. ' : '')
+        + (hasAtlasKb ? 'ATLAS has no detection strategies: its detection controls (for example AML.M0024 AI Telemetry Logging and Monitoring) are ATLAS mitigations, so ATLAS techniques count as mitigated or not, never as detected. ' : '')
         + `Readiness here measures coverage of ${kbList(P)} mappings, not overall security.`],
       hasAttackKb ? ['ATT&CK licence', `© ${year} The MITRE Corporation. This work is reproduced and distributed with the permission of The MITRE Corporation. `
         + 'License: The MITRE Corporation (MITRE) hereby grants you a non-exclusive, royalty-free license to use ATT&CK® for research, development, and commercial purposes. '
         + 'Any copy you make for such purposes is authorized provided that you reproduce MITRE\'s copyright designation and this license in any such copy. '
         + 'MITRE ATT&CK and ATT&CK are registered trademarks of The MITRE Corporation. Source: https://github.com/mitre-attack/attack-stix-data'] : null,
-      hasAtlasKb ? ['ATLAS licence', `© 2021–${atlasYear} The MITRE Corporation. MITRE ATLAS data is licensed under the Apache License, Version 2.0 `
+      hasAtlasKb ? ['ATLAS licence', `© ${atlasYear > 2021 ? '2021–' + atlasYear : '2021'} The MITRE Corporation. MITRE ATLAS data is licensed under the Apache License, Version 2.0 `
         + '(https://www.apache.org/licenses/LICENSE-2.0); it is distributed on an "AS IS" basis, without warranties or conditions of any kind. '
         + 'MITRE ATLAS and ATLAS are trademarks of The MITRE Corporation. Source: https://github.com/mitre-atlas/atlas-data'] : null,
     ].filter(Boolean);

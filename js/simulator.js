@@ -42,40 +42,92 @@
   const byName = (a, b) => (a.name || '').localeCompare(b.name || '');
   const byAttackId = (a, b) => String(a.attackId).localeCompare(String(b.attackId), undefined, { numeric: true });
 
+  const ENTITIES = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'", nbsp: ' ' };
+  const decodeEntities = t => t.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
+    if (e[0] === '#') {
+      const n = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : Number(e.slice(1));
+      return n > 0 && n < 0x110000 ? String.fromCodePoint(n) : m;
+    }
+    const k = e.toLowerCase();
+    return Object.prototype.hasOwnProperty.call(ENTITIES, k) ? ENTITIES[k] : m;
+  });
+
   /**
-   * Minimal, safe rendering of ATT&CK and ATLAS description markdown (links, code, bullets).
-   * ATT&CK (Citation: …) and ATLAS [[ref]] markers are stripped; ATLAS's site-relative links
-   * (/software/AML.S0001) point at atlas.mitre.org (ATT&CK text has none).
+   * ATT&CK and ATLAS markup reduced to what md() renders. Citation markers go (ATT&CK "(Citation: …)",
+   * ATLAS "[[ref]]" and, in older releases, "[[7]](url)"); <br> becomes a line break; ATLAS's
+   * presentational wrappers (<atlas-example>, <atlas-technique>, <div>, <span>, <sup>) are dropped and
+   * their text kept; ATLAS site-relative links point at atlas.mitre.org. Code spans and fences are left
+   * untouched, and any other angle-bracket text (placeholders such as <profile_name>) stays as written.
    */
+  function normalizeMarkup(text) {
+    const code = [];
+    return String(text)
+      .replace(/```[\s\S]*?```|`[^`\n]+`/g, m => '\u0001' + (code.push(m) - 1) + '\u0002')
+      .replace(/\s*\(Citation:[^)]*\)/g, '')
+      .replace(/\[\[[^\]]*\]\](\(\s*[^)\s]*\s*\))?/g, '')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/?(?:atlas-[a-z-]+|div|span|sup)(?:\s[^>]*)?>/gi, '')
+      .replace(/<code>([^<]*)<\/code>/gi, '`$1`')
+      .replace(/\]\(\s*\/?((?:tactics|techniques|mitigations|studies|entities|software)\/[^)\s]*)\s*\)/g, '](https://atlas.mitre.org/$1)')
+      .replace(/\u0001(\d+)\u0002/g, (_, i) => code[Number(i)]);
+  }
+
+  /** Safe rendering of description markdown: paragraphs, bullets, tables, quotes, code, links, bold. */
   function md(text) {
     const frag = document.createDocumentFragment();
     if (!text) return frag;
-    const clean = text.replace(/\s*\(Citation:[^)]*\)/g, '').replace(/\[\[[^\]]*\]\]/g, '')
-      .replace(/\]\((\/[^)\s]*)\)/g, '](https://atlas.mitre.org$1)').trim();
     const inline = (s, parent) => {
-      const re = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)|`([^`]+)`|\*\*([^*]+)\*\*/g;
+      // [text](url), [text]() (no target: just the text), `code`, **bold**
+      const re = /\[([^\]]+)\]\(\s*(https?:\/\/[^)\s]+)?\s*\)|`([^`]+)`|\*\*([^*]+)\*\*/g;
       let last = 0, m;
       while ((m = re.exec(s))) {
-        if (m.index > last) parent.append(s.slice(last, m.index));
-        if (m[1]) parent.append(el('a', { href: m[2], target: '_blank', rel: 'noopener', text: m[1] }));
-        else if (m[3]) parent.append(el('code', { text: m[3] }));
-        else parent.append(el('strong', { text: m[4] }));
+        if (m.index > last) parent.append(decodeEntities(s.slice(last, m.index)));
+        if (m[1] != null) parent.append(m[2] ? el('a', { href: m[2], target: '_blank', rel: 'noopener', text: decodeEntities(m[1]) }) : decodeEntities(m[1]));
+        else if (m[3] != null) parent.append(el('code', { text: decodeEntities(m[3]) }));
+        else parent.append(el('strong', { text: decodeEntities(m[4]) }));
         last = re.lastIndex;
       }
-      if (last < s.length) parent.append(s.slice(last));
+      if (last < s.length) parent.append(decodeEntities(s.slice(last)));
     };
-    for (const block of clean.split(/\n\s*\n/)) {
-      const lines = block.split('\n').filter(l => l.trim());
-      if (lines.length && lines.every(l => /^\s*[*-]\s+/.test(l))) {
-        const ul = el('ul');
-        for (const l of lines) { const li = el('li'); inline(l.replace(/^\s*[*-]\s+/, ''), li); ul.append(li); }
-        frag.append(ul);
-      } else if (lines.length) {
-        const p = el('p');
-        inline(lines.join(' '), p);
-        frag.append(p);
+    const isRow = l => /^\s*\|.*\|\s*$/.test(l);
+    const isRule = l => /^\s*\|?(\s*:?-+:?\s*\|)+\s*:?-*:?\s*\|?\s*$/.test(l);
+    const cells = l => l.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+    const renderLines = lines => {
+      // runs of the same kind of line: bullets, table rows, quotes, or paragraph text
+      const kind = l => (/^\s*[*-]\s+/.test(l) ? 'ul' : isRow(l) ? 'table' : /^\s*>/.test(l) ? 'quote' : 'p');
+      for (let i = 0; i < lines.length;) {
+        const k = kind(lines[i]);
+        let j = i;
+        while (j < lines.length && kind(lines[j]) === k) j++;
+        const run = lines.slice(i, j);
+        if (k === 'ul') {
+          const ul = el('ul');
+          for (const l of run) { const li = el('li'); inline(l.replace(/^\s*[*-]\s+/, ''), li); ul.append(li); }
+          frag.append(ul);
+        } else if (k === 'table' && run.length > 1) {
+          const rows = run.filter(l => !isRule(l)).map(cells);
+          const hasHead = run.length > 1 && isRule(run[1]);
+          const tr = (r, tag) => el('tr', {}, ...r.map(c => { const td = el(tag); inline(c, td); return td; }));
+          frag.append(el('div', { class: 'md-table' }, el('table', {},
+            hasHead ? el('thead', {}, tr(rows[0], 'th')) : null,
+            el('tbody', {}, ...rows.slice(hasHead ? 1 : 0).map(r => tr(r, 'td'))))));
+        } else if (k === 'quote') {
+          const q = el('blockquote');
+          inline(run.map(l => l.replace(/^\s*>\s?/, '')).join(' '), q);
+          frag.append(q);
+        } else {
+          const p = el('p');
+          inline(run.map(l => l.replace(/^\s*#{1,6}\s+/, '')).join(' '), p);
+          frag.append(p);
+        }
+        i = j;
       }
-    }
+    };
+    // fenced code blocks keep their lines; everything else splits into blocks at blank lines
+    normalizeMarkup(text).trim().split(/```[^\n`]*\n?([\s\S]*?)```/).forEach((part, i) => {
+      if (i % 2) { frag.append(el('pre', {}, el('code', { text: decodeEntities(part.replace(/\n$/, '')) }))); return; }
+      for (const block of part.split(/\n\s*\n/)) renderLines(block.split('\n').filter(l => l.trim()));
+    });
     return frag;
   }
 
@@ -109,7 +161,7 @@
   const EXAMPLES = [
     ['groups', 'G0016'], ['groups', 'G1017'], ['groups', 'G0034'],
     ['campaigns', 'C0028'], ['software', 'S0604'], ['groups', 'G1015'],
-    ['caseStudies', 'AML.CS0069'], ['caseStudies', 'AML.CS0035'], ['atlasSoftware', 'AML.S0015'],
+    ['caseStudies', 'AML.CS0069'], ['caseStudies', 'AML.CS0057'], ['atlasSoftware', 'AML.S0015'],
   ];
   // ATT&CK domains a saved profile could have known before ATLAS was added
   const PRE_ATLAS_DOMAINS = ['enterprise-attack', 'ics-attack', 'mobile-attack'];
@@ -124,7 +176,7 @@
     inPlace: { mitigations: new Set(), detections: new Set() },
     ui: {
       pickFamily: 'attack', pickTab: 'groups', lastTab: {}, search: '', matchDesc: false,
-      swType: '', swPlatform: '', swCategory: '', csType: '', entType: '', campSince: '',
+      swType: '', swPlatform: '', swCategory: '', csType: '', entType: '', purpose: '', campSince: '',
       tab: 'matrix', matrixDomain: null, colorMode: 'usage', showAll: false, filter: '', sort: {},
     },
     results: [],
@@ -293,6 +345,7 @@
     $('#swCategory').hidden = tab !== 'atlasSoftware';
     $('#csType').hidden = tab !== 'caseStudies';
     $('#entType').hidden = tab !== 'entities';
+    $('#purpose').hidden = tab !== 'caseStudies' && tab !== 'entities';
     $('#campSince').hidden = tab !== 'campaigns' && tab !== 'caseStudies';
 
     const cat = catalogs();
@@ -302,6 +355,8 @@
       v => v.replace(/-/g, ' ').replace(/\bai\b/g, 'AI'));
     state.ui.csType = fillSelect($('#csType'), 'Incidents & exercises', values(cat.caseStudies, o => o.caseType), state.ui.csType, v => v + 's');
     state.ui.entType = fillSelect($('#entType'), 'Any entity type', values(cat.entities, o => o.entityType), state.ui.entType);
+    const purposeRows = tab === 'entities' ? cat.entities : cat.caseStudies;
+    state.ui.purpose = fillSelect($('#purpose'), 'Any activity purpose', values(purposeRows, purposesOf), state.ui.purpose);
 
     const cs = $('#campSince');
     const now = new Date().getFullYear();
@@ -311,8 +366,12 @@
     cs.value = state.ui.campSince;
   }
 
-  /** Last year a campaign or case study was active; an ATLAS case study with no end date is ongoing. */
+  /** Last date a campaign or case study was active; an ATLAS case study with no end date is ongoing. */
   const lastActive = obj => (obj.kind === 'case-study' && obj.firstSeen && !obj.lastSeen ? new Date().toISOString() : obj.lastSeen || obj.firstSeen);
+  /** The year a date string names, read from the string so no time zone can shift it (ATLAS dates are plain days). */
+  const yearOf = s => (s ? Number(String(s).slice(0, 4)) : null);
+  /** ATLAS activity purposes of a case study or entity (Adversarial Operation, Security Evaluation…). */
+  const purposesOf = obj => (familyOf(obj.domain) === 'atlas' && state.models[obj.domain] ? SimEngine.activityPurposes(state.models[obj.domain], obj) : []);
 
   function filteredCatalog() {
     const tab = state.ui.pickTab;
@@ -330,9 +389,10 @@
       }
       if (tab === 'caseStudies' && state.ui.csType && obj.caseType !== state.ui.csType) return false;
       if (tab === 'entities' && state.ui.entType && obj.entityType !== state.ui.entType) return false;
+      if ((tab === 'entities' || tab === 'caseStudies') && state.ui.purpose && !purposesOf(obj).includes(state.ui.purpose)) return false;
       if ((tab === 'campaigns' || tab === 'caseStudies') && state.ui.campSince) {
         const last = lastActive(obj);
-        if (!last || new Date(last).getFullYear() < Number(state.ui.campSince)) return false;
+        if (!last || yearOf(last) < Number(state.ui.campSince)) return false;
       }
       return true;
     });
@@ -341,23 +401,35 @@
     return rows;
   }
 
+  /** Selected threats of a tab that exist in the domains switched on (a pinned older ATLAS release may lack some). */
+  function selectedPresent(key) {
+    const present = new Set(catalogs()[key].map(e => e.obj.id));
+    return [...state.selection[key]].filter(id => present.has(id)).length;
+  }
+
   function renderPicker() {
     syncPickTab();
+    // the switch and tabs are rebuilt below; keep keyboard focus on the button that was used
+    const focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.pick : null;
     const fams = activeFamilies();
     const famHost = $('#pickFamily');
     famHost.hidden = fams.length < 2;
     famHost.replaceChildren(...fams.map(f => {
-      const n = PICK_TABS.filter(t => t.family === f).reduce((sum, t) => sum + state.selection[t.key].size, 0);
+      const n = PICK_TABS.filter(t => t.family === f).reduce((sum, t) => sum + selectedPresent(t.key), 0);
       return el('button', {
-        'aria-pressed': String(state.ui.pickFamily === f),
+        'aria-pressed': String(state.ui.pickFamily === f), data: { pick: 'family:' + f },
         on: { click: () => { state.ui.pickFamily = f; state.ui.pickTab = null; renderPickerFilters(); renderPicker(); persist(); } },
       }, AttackDB.FAMILIES[f].name + ' ', el('span', { class: 'count', text: n ? '(' + n + ')' : '' }));
     }));
     $('#pickTabs').setAttribute('aria-label', AttackDB.FAMILIES[state.ui.pickFamily].name + ' threat categories');
-    $('#pickTabs').replaceChildren(...PICK_TABS.filter(t => t.family === state.ui.pickFamily).map(t => el('button', {
-      role: 'tab', 'aria-selected': String(state.ui.pickTab === t.key),
-      on: { click: () => { state.ui.pickTab = t.key; renderPickerFilters(); renderPicker(); persist(); } },
-    }, t.label + ' ', el('span', { class: 'count', text: state.selection[t.key].size ? '(' + state.selection[t.key].size + ')' : '' }))));
+    $('#pickTabs').replaceChildren(...PICK_TABS.filter(t => t.family === state.ui.pickFamily).map(t => {
+      const n = selectedPresent(t.key);
+      return el('button', {
+        role: 'tab', 'aria-selected': String(state.ui.pickTab === t.key), data: { pick: 'tab:' + t.key },
+        on: { click: () => { state.ui.pickTab = t.key; renderPickerFilters(); renderPicker(); persist(); } },
+      }, t.label + ' ', el('span', { class: 'count', text: n ? '(' + n + ')' : '' }));
+    }));
+    if (focused) { const b = document.querySelector(`[data-pick="${focused}"]`); if (b) b.focus(); }
 
     const rows = filteredCatalog();
     const sel = state.selection[state.ui.pickTab];
@@ -366,7 +438,11 @@
     $('#pickShown').textContent = fmtN(rows.length) + ' shown';
     const list = $('#pickList');
     if (!rows.length) {
-      list.replaceChildren(el('div', { class: 'empty', style: 'padding:12px', text: 'Nothing matches these filters.' }));
+      const tab = PICK_TABS.find(t => t.key === state.ui.pickTab);
+      const atlas = activeModels().find(m => familyOf(m.domain) === 'atlas');
+      list.replaceChildren(el('div', { class: 'empty', style: 'padding:12px', text: catalogs()[tab.key].length ? 'Nothing matches these filters.'
+        : atlas && tab.family === 'atlas' ? `ATLAS v${atlas.meta.version} has no ${tab.label.toLowerCase()}: ATLAS added entities and software in release 2026.10. Pull a newer ATLAS release on the Data page.`
+          : 'None in the domains switched on.' }));
       return;
     }
     list.replaceChildren(...rows.map(({ obj, domains, techCount }) => {
@@ -389,13 +465,14 @@
 
   /** Short facts for a picker row (after the ID, before aliases). */
   function pickMeta(obj) {
-    const y = s => (s ? new Date(s).getUTCFullYear() : '?');
+    const y = s => yearOf(s) || '?';
     const span = (a, b) => (y(a) === y(b) ? String(y(a)) : y(a) + '–' + y(b));
     switch (obj.kind) {
       case 'software': return [obj.softwareType, (obj.softwareCategories || []).join(', ')];
       case 'campaign': return [obj.firstSeen || obj.lastSeen ? y(obj.firstSeen) + '–' + y(obj.lastSeen) : null];
-      case 'case-study': return [obj.caseType, obj.firstSeen ? (obj.lastSeen ? span(obj.firstSeen, obj.lastSeen) : y(obj.firstSeen) + '–ongoing') : null];
-      case 'entity': return [obj.entityType];
+      case 'case-study': return [obj.caseType, obj.firstSeen ? (obj.lastSeen ? span(obj.firstSeen, obj.lastSeen) : y(obj.firstSeen) + '–ongoing') : null,
+        purposesOf(obj).join(', ')];
+      case 'entity': return [obj.entityType, purposesOf(obj).join(', ')];
       default: return [];
     }
   }
@@ -572,7 +649,7 @@
     $('#kpis').replaceChildren(
       tile('Techniques in scope', fmtN(t.tech), fmtN(t.subs) + ' sub-techniques · ' + t.tacticsHit + ' of ' + t.tacticsAll + ' tactics'),
       tile('Mitigations', fmtN(t.mit), fmtN(t.mitIn) + ' in place'),
-      tile('Detection strategies', fmtN(t.det), atlasOnly ? 'ATLAS defines none, so ATLAS techniques rely on mitigations'
+      tile('Detection strategies', fmtN(t.det), atlasOnly ? 'ATLAS has none; its detection controls are listed as mitigations'
         : fmtN(t.detIn) + ' deployed' + (atlas ? ' · ATT&CK only' : '')),
       tile('Data components', fmtN(t.dc), atlasOnly ? 'none: ATLAS defines no detection strategies'
         : 'telemetry the detections rely on' + (t.dcShared ? ` · ${fmtN(t.dcShared)} used by more than one domain` : '')),
@@ -650,8 +727,8 @@
       el('label', { class: 'toggle' }, showAll, 'Show all techniques'),
       mode === 'usage'
         ? (max > 1
-          ? el('span', { class: 'scale' }, '1', el('span', { class: 'ramp' }, ...[1, 2, 3, 4, 5, 6].map(i => el('span', { style: `background:var(--seq-${i})` }))), max + ' adversaries')
-          : el('span', { class: 'hint', text: 'Shade shows how many selected adversaries use a technique.' }))
+          ? el('span', { class: 'scale' }, '1', el('span', { class: 'ramp' }, ...[1, 2, 3, 4, 5, 6].map(i => el('span', { style: `background:var(--seq-${i})` }))), max + ' ' + whoPlural(r.domain))
+          : el('span', { class: 'hint', text: 'Shade shows how many selected ' + whoPlural(r.domain) + ' use a technique.' }))
         : el('span', { class: 'legend' }, ...Object.entries(STATUS).map(([k, s]) => el('span', { class: 'stat-badge' }, el('span', { class: 'ic ' + k, text: s.icon }), s.label))),
     ]);
 
@@ -825,7 +902,8 @@
       filterBox('Filter ' + kind, rerender),
       el('button', { text: 'Mark top 5 ' + label, title: 'Simulate adding the five highest-priority items', on: { click: () => applyTop(5) } }),
       el('button', { text: 'Reset', title: 'Clear ' + label + ' for this profile', on: { click: reset } }),
-      el('span', { class: 'hint', text: 'Priority: pick the item covering the most uncovered techniques, weighting techniques used by more selected adversaries higher, then repeat. Equal scores share a number.' }),
+      el('span', { class: 'hint', text: 'Priority: pick the item covering the most uncovered techniques, weighting techniques used by more selected '
+        + (state.results.some(r => familyOf(r.domain) === 'atlas') ? 'threats' : 'adversaries') + ' higher, then repeat. Equal scores share a number.' }),
     );
   }
 
@@ -864,7 +942,8 @@
 
   /** ATLAS has no detection strategies or telemetry: say so instead of showing an empty table. */
   const noDetections = r => familyOf(r.domain) === 'atlas'
-    ? el('p', { class: 'hint', text: 'ATLAS defines no detection strategies, so its ' + plural(r.techniques.size, 'technique', 'techniques') + ' can be covered only by mitigations here.' })
+    ? el('p', { class: 'hint', text: 'ATLAS has no detection strategies. Its detection controls, such as AML.M0024 AI Telemetry Logging and Monitoring, '
+      + 'are ATLAS mitigations, so its ' + plural(r.techniques.size, 'technique', 'techniques') + ' are covered on the Mitigations tab.' })
     : null;
 
   function renderMitigations(tools, body) {
@@ -1048,6 +1127,7 @@
       out.push(el('div', { class: 'kicker', style: 'margin-top:6px' }, 'Sub-technique of ', techButton(domain, model.byId.get(tech.parent))));
     }
     out.push(el('details', { style: 'margin-top:10px' }, el('summary', { text: 'Description' }), el('div', { class: 'md' }, md(tech.description))));
+    out.push(referencesBlock(tech));
 
     if (t) {
       const byRoot = new Map();
@@ -1082,7 +1162,7 @@
 
     const dets = model.to(techId, 'detects', 'detection-strategy');
     out.push(el('section', {}, el('h3', { text: 'Detection strategies (' + dets.length + ')' }),
-      familyOf(domain) === 'atlas' ? el('p', { class: 'hint', text: 'ATLAS defines no detection strategies.' }) : null,
+      familyOf(domain) === 'atlas' ? el('p', { class: 'hint', text: 'ATLAS has no detection strategies; its detection controls are listed above as mitigations.' }) : null,
       ...dets.map(rel => {
         const ds = model.byId.get(rel.source);
         const all = (ds.analyticRefs || []).map(id => model.byId.get(id)).filter(a => a && a.active);
@@ -1121,6 +1201,7 @@
     }
     out.push(attackRefLine(m));
     out.push(el('div', { class: 'md', style: 'margin-top:10px' }, md(m.description)));
+    out.push(referencesBlock(m));
     if (e) {
       out.push(el('section', {}, el('h3', { text: 'Profile techniques it addresses (' + e.techniques.size + ' of ' + r.techniques.size + ')' }),
         ...profileTechniqueList(domain, e.techniques, tech => e.guidance.get(tech.id))));
@@ -1172,14 +1253,42 @@
     return out;
   }
 
+  /** What the matrix counts per technique: ATT&CK adversaries, or ATLAS threats (case studies, entities, software). */
+  const whoPlural = domain => (familyOf(domain) === 'atlas' ? 'threats' : 'adversaries');
+
+  /**
+   * ATLAS facts for a case study, entity or software: short tags (type, dates, activity purpose), then
+   * wrapping lines for attribution (with ATLAS's activity purpose), actor, target and reporting credit.
+   */
+  function atlasFacts(o) {
+    const m = state.models[o.domain];
+    const name = id => (m.byId.get(id) || {}).name || id;
+    const out = [];
+    const tags = pickMeta(o).filter(Boolean);
+    if (tags.length) out.push(el('div', { class: 'tags', style: 'margin-top:6px' }, tags.map(f => el('span', { class: 'tag', text: f }))));
+    const lines = [];
+    const withPurpose = (id, r) => name(id) + (r.activityPurpose ? ' (' + r.activityPurpose + ')' : '');
+    if (o.kind === 'case-study') {
+      const attr = m.from(o.id, 'attributed-to');
+      if (attr.length) lines.push(['Attributed to', attr.map(r => withPurpose(r.target, r)).join('; ')]);
+      if (o.actor && !attr.some(r => name(r.target) === o.actor)) lines.push(['Actor', o.actor]);
+      if (o.target) lines.push(['Target', o.target]);
+      const rep = m.from(o.id, 'reported-by');
+      if (o.reporter || rep.length) lines.push(['Reported by', o.reporter || rep.map(r => name(r.target)).join('; ')]);
+    } else if (o.kind === 'entity') {
+      const cs = m.to(o.id, 'attributed-to');
+      if (cs.length) lines.push(['Case studies attributed to it', cs.map(r => withPurpose(r.source, r)).join('; ')]);
+    }
+    if (lines.length) out.push(el('div', { class: 'facts' }, lines.map(([k, v]) => el('div', {}, el('b', { text: k + ': ' }), v))));
+    return out;
+  }
+
   function entityDrawer(id, tab) {
     const o = entity(id);
     const out = drawerHead(tab.one + (o.softwareType ? ' (' + o.softwareType + ')' : '') + (familyOf(o.domain) === 'atlas' ? ' · ATLAS' : ''), o);
     const aliases = (o.aliases || []).filter(a => a !== o.name);
     if (aliases.length) out.push(el('div', { class: 'kicker', style: 'margin-top:4px', text: (o.kind === 'entity' ? 'Associated with ' : 'Also known as ') + aliases.join(', ') }));
-    const facts = [...pickMeta(o), o.kind === 'case-study' && o.actor ? 'Actor: ' + o.actor : null, o.target ? 'Target: ' + o.target : null,
-      o.reporter ? 'Reported by ' + o.reporter : null].filter(Boolean);
-    if (familyOf(o.domain) === 'atlas' && facts.length) out.push(el('div', { class: 'tags', style: 'margin-top:6px' }, facts.map(f => el('span', { class: 'tag', text: f }))));
+    if (familyOf(o.domain) === 'atlas') out.push(...atlasFacts(o));
     out.push(attackRefLine(o));
     const contrib = state.results.map(r => {
       let n = 0;
@@ -1230,7 +1339,7 @@
       opts: Object.assign({}, state.opts, { platforms: new Set(state.opts.platforms) }),
       selection: Object.fromEntries(Object.entries(state.selection).map(([k, v]) => [k, new Set(v)])),
       showAll: state.ui.showAll,
-      kinds: PICK_TABS, entity, domainLabel, domainInfo,
+      kinds: PICK_TABS, entity, domainLabel, domainInfo, activityPurposes: purposesOf,
       platformsByDomain: Object.fromEntries(state.results.map(r => [r.domain, [...platformsFor(r.domain)]])),
       generatedAt: new Date(),
     };
@@ -1297,7 +1406,7 @@
         name: 'ThreatSim: ' + profileName(),
         versions: atlas ? { navigator: '5.3.2', layer: '4.5' } : { attack: String(r.model.meta.version).split('.')[0], navigator: '5.1.0', layer: '4.5' },
         domain: atlas ? 'atlas-atlas' : r.domain,
-        description: 'Generated by ThreatSim from ' + familyName(r.domain) + ' v' + r.model.meta.version + '. ' + (coverage ? 'Colored by simulated coverage.' : 'Score = number of selected adversaries using the technique.'),
+        description: 'Generated by ThreatSim from ' + familyName(r.domain) + ' v' + r.model.meta.version + '. ' + (coverage ? 'Colored by simulated coverage.' : 'Score = number of selected ' + whoPlural(r.domain) + ' using the technique.'),
         sorting: 3,
         layout: { layout: 'side', showID: true, showName: true },
         hideDisabled: false,
@@ -1345,6 +1454,7 @@
     $('#swCategory').addEventListener('change', e => { state.ui.swCategory = e.target.value; renderPicker(); });
     $('#csType').addEventListener('change', e => { state.ui.csType = e.target.value; renderPicker(); });
     $('#entType').addEventListener('change', e => { state.ui.entType = e.target.value; renderPicker(); });
+    $('#purpose').addEventListener('change', e => { state.ui.purpose = e.target.value; renderPicker(); });
     $('#campSince').addEventListener('change', e => { state.ui.campSince = e.target.value; renderPicker(); });
     $('#pickAll').addEventListener('click', () => {
       const sel = state.selection[state.ui.pickTab];

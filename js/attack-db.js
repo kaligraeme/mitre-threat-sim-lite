@@ -621,7 +621,8 @@
     if (!Array.isArray(manifest)) throw new Error('ATLAS manifest: unexpected format');
     const versions = [];
     for (const r of manifest) {
-      const v6 = (r && r.versions || []).find(v => v && String(v['format-version']).split('.')[0] === '6');
+      if (!r || typeof r !== 'object' || !Array.isArray(r.versions)) continue;   // skip a malformed entry, keep the rest
+      const v6 = r.versions.find(v => v && String(v['format-version']).split('.')[0] === '6');
       // paths are relative to dist/ (e.g. v6/ATLAS-2026.10.yaml); refuse anything else
       if (!r.release || !v6 || !/^[\w.-]+(\/[\w.-]+)*$/.test(String(v6.path)) || String(v6.path).includes('..')) continue;
       versions.push({ version: String(r.release), modified: r['release-date'] ? String(r['release-date']) : null,

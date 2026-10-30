@@ -16,7 +16,10 @@ Software, to the techniques they use, then to the relevant mitigations and detec
    - **ATT&CK:** Groups, Software and Campaigns (filters: description keywords, software type and
      platform, campaign activity window).
    - **ATLAS:** Case Studies, Entities and Software, as on the ATLAS site (filters: incident or exercise,
-     date, entity type, software type and category).
+     date, entity type, activity purpose, software type and category). ATLAS records why each case
+     study and entity is there (*Adversarial Operation*, *Security Evaluation* or *Unintended
+     Consequence*): many ATLAS entities are red teams and researchers, so the picker, the details and the
+     workpaper show that purpose, and the filter can keep a profile to real adversary activity.
 
    An **ATT&CK | ATLAS** switch appears when both are on. **Select all shown** adds everything the
    current filter matches.
@@ -34,12 +37,14 @@ Software, to the techniques they use, then to the relevant mitigations and detec
    - **ICS assets:** assets targeted by the profile's ICS techniques.
    - Click any row or matrix cell for details: procedure examples, mitigation guidance, and analytics
      with their log sources. ATLAS details add technique maturity, mitigation categories and AI
-     lifecycle phases, the matching ATT&CK object where ATLAS names one, and sources.
+     lifecycle phases, attribution with its activity purpose, the matching ATT&CK object where ATLAS
+     names one, and sources.
 4. **Export:** an Excel workpaper (below), a CSV of the technique mapping, or Navigator layers (one
    JSON per domain; the ATLAS layer opens in the ATLAS Navigator).
 
-ATLAS defines no detection strategies, so ATLAS techniques can be mitigated but not detected; the
-Detections and Telemetry views say so instead of showing empty tables.
+ATLAS has no detection strategies: its detection controls (for example *AML.M0024 AI Telemetry Logging
+and Monitoring*) are ATLAS mitigations, so ATLAS techniques count as mitigated or not, never as detected.
+The Detections and Telemetry views say so instead of showing empty tables.
 
 Priority uses a weighted greedy method: each step picks the control that covers the most uncovered
 techniques, with a technique counting once per selected threat that uses it. Controls with equal
@@ -71,9 +76,9 @@ technique coverage, the readiness figures and bars, the matrix status column and
 statuses in ThreatSim and export again. Controls with equal priority scores share a priority number and
 are listed by reach, documented procedure examples, then ID.
 
-Workbooks that include ATLAS name each domain by its own title (for example *ATLAS v2026.10*), note
-that ATLAS defines no detection strategies, and carry the ATLAS licence (Apache 2.0) beside the ATT&CK
-terms of use.
+Workbooks that include ATLAS name each domain by its own title (for example *ATLAS v2026.10*), show
+each ATLAS threat's case type and activity purpose, note that ATLAS's detection controls are
+mitigations, and carry the ATLAS licence (Apache 2.0) beside the ATT&CK terms of use.
 
 The bars are conditional formatting on cells, so they work in Excel, LibreOffice Calc and Google Sheets.
 Every formula also stores its value at export, so file previews that don't recalculate still show the
@@ -90,7 +95,7 @@ export. ATLAS YAML is parsed with [js-yaml](https://github.com/nodeca/js-yaml) 4
 ## Run
 
 ```bash
-cd mitre-threat-sim
+cd mitre-threat-sim-plus
 python3 -m http.server 8000
 ```
 

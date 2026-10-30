@@ -58,9 +58,23 @@
       .map(r => model.byId.get(r.source)).filter(c => c && c.active);
   }
 
-  /** Technique count per entity (direct "uses" only), for the picker lists. */
+  /** Distinct techniques a threat uses directly, for the picker lists (an ATLAS case study can
+   *  employ one technique in several attack-chain steps, which counts once). */
   function directTechniqueCount(model, id) {
-    return model.from(id, 'uses', 'technique').length;
+    return new Set(model.from(id, 'uses', 'technique').map(r => r.target)).size;
+  }
+
+  /**
+   * Why an ATLAS case study or entity is in the record, as ATLAS states it on attribution:
+   * 'Adversarial Operation', 'Security Evaluation' or 'Unintended Consequence' (ATLAS: identity type
+   * does not imply intent). Case study: its attributed-to links. Entity: the case studies attributed
+   * to it, and its own uses links. Empty when ATLAS records none, and for ATT&CK objects.
+   */
+  function activityPurposes(model, obj) {
+    const rels = obj.kind === 'case-study' ? model.from(obj.id, 'attributed-to')
+      : obj.kind === 'entity' ? [...model.to(obj.id, 'attributed-to'), ...model.from(obj.id, 'uses')]
+        : [];
+    return [...new Set(rels.map(r => r.activityPurpose).filter(Boolean))].sort();
   }
 
   /**
@@ -325,7 +339,7 @@
 
   global.SimEngine = {
     loadModel, analyzeDomain, applyPosture, prioritize, procedures, matrixColumns,
-    directTechniqueCount, documentedTechniqueCount, attributedTo, platformMatch,
+    directTechniqueCount, documentedTechniqueCount, attributedTo, activityPurposes, platformMatch,
     ACTOR_KINDS, CAMPAIGN_KINDS, SELECTION_ORDER,
   };
 })(window);
