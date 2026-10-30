@@ -7,8 +7,30 @@ Software, to the techniques they use, then to the relevant mitigations and detec
 
 ## Pages
 
-- **Data** (`index.html`): pull MITRE ATT&CK and ATLAS releases into the local database.
+- **Sign in** (`index.html`): the landing page. The other pages send you here until you sign in.
+- **Data** (`data.html`): pull MITRE ATT&CK and ATLAS releases into the local database.
 - **Simulator** (`simulator.html`): build a threat profile and map it to mitigations and detections.
+
+## Sign-in
+
+ThreatSim opens on a sign-in page. The first time, sign in with username `admin` and password `admin`.
+Until you change that password, a banner on every page asks you to: use **Change password** in the
+header (at least 8 characters, and not `admin` or the username). **Sign out** signs you out in every tab
+of this browser, and a session ends by itself after 12 hours. After five wrong passwords in a row,
+sign-in pauses for 30 seconds.
+
+ThreatSim never stores the password itself, only a PBKDF2-SHA-256 hash of it (310,000 iterations, random
+salt). The hash, the session and the count of failed attempts are kept in this browser's localStorage.
+
+**Forgotten password:** in the browser's developer tools, remove the `threatsim.auth.users` key from this
+site's local storage (or run `localStorage.removeItem('threatsim.auth.users')` in the console). The next
+sign-in recreates `admin` / `admin`. Clearing the site's data does the same, but also deletes the MITRE
+data you pulled.
+
+**What sign-in protects:** it keeps other people who use this browser out of this copy of ThreatSim. It
+is not server-side security. ThreatSim is static files that run in the browser, so anyone with the files,
+or with the browser's developer tools, can get past it. To control who can reach a hosted copy, use your
+web server's or hosting provider's access control.
 
 ## Simulator
 
@@ -95,12 +117,13 @@ export. ATLAS YAML is parsed with [js-yaml](https://github.com/nodeca/js-yaml) 4
 ## Run
 
 ```bash
-cd mitre-threat-sim-plus
+cd mitre-threat-sim-pro
 python3 -m http.server 8000
 ```
 
-Open http://localhost:8000 and press **Pull**. Opening `index.html` directly from disk also works,
-but serving it keeps the database on one origin for every page you add later.
+Open http://localhost:8000, sign in (`admin` / `admin` the first time), then press **Pull** on the Data
+page. Opening `index.html` directly from disk also works, but serving it keeps the database on one
+origin for every page you add later.
 
 ## How it works
 

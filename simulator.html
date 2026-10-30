@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ATT&amp;CK and ATLAS Threat Simulator</title>
+<script src="js/auth.js"></script>
+<script>Auth.requireSignIn();</script>
 <link rel="stylesheet" href="css/app.css">
 <style>
   /* ---- data-viz tokens: sequential blue (usage) + status (coverage) ---- */
@@ -230,7 +232,7 @@
   <div class="wrap wide">
     <div class="brand">Threat<span>Sim</span> · ATT&amp;CK · ATLAS</div>
     <nav>
-      <a href="index.html">Data</a>
+      <a href="data.html">Data</a>
       <a href="simulator.html" aria-current="page">Simulator</a>
     </nav>
   </div>
@@ -240,7 +242,7 @@
   <div id="noData" class="card empty-state" hidden>
     <h2>No ATT&amp;CK or ATLAS data stored yet</h2>
     <p>Pull the Enterprise ATT&amp;CK, ICS ATT&amp;CK and ATLAS datasets first, then come back here.</p>
-    <p><a href="index.html">Go to the Data page →</a></p>
+    <p><a href="data.html">Go to the Data page →</a></p>
   </div>
 
   <div id="app" class="sim" hidden>

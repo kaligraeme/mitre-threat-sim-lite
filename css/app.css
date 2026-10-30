@@ -123,3 +123,37 @@ a { color: var(--accent); }
        background: var(--surface-2); border-radius: 8px; padding: 8px 10px; white-space: pre-wrap; margin: 0; }
 .empty { color: var(--muted); font-size: 14px; padding: 8px 0; }
 footer { color: var(--muted); font-size: 12px; padding: 24px 0; border-top: 1px solid var(--border); }
+
+/* ---------- sign-in (index.html) ---------- */
+main.signin { display: flex; flex-direction: column; align-items: center; padding-top: 56px; }
+.signin-card { width: min(380px, 100%); padding: 24px; }
+.signin-card .sub { margin-bottom: 12px; }
+.auth-form { display: flex; flex-direction: column; gap: 6px; }
+.auth-form label:not(.chk) { font-size: 14px; font-weight: 600; margin-top: 8px; }
+.auth-form input:not([type="checkbox"]) {
+  font: inherit; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); width: 100%;
+}
+.auth-form input[aria-invalid="true"] { border-color: var(--err); }
+.auth-form .chk { margin-top: 6px; }
+.auth-form button.primary { margin-top: 14px; }
+.auth-form h2 { margin-bottom: 4px; }
+.form-error { color: var(--err); font-size: 14px; margin: 8px 0 0; }
+.signin-hint { font-size: 13px; color: var(--muted); margin: 16px 0 0; padding-top: 12px; border-top: 1px solid var(--border); }
+.signin-note { font-size: 12.5px; color: var(--muted); max-width: 380px; text-align: center; margin: 16px 0 0; }
+
+/* ---------- account controls on signed-in pages ---------- */
+.account { display: flex; align-items: center; gap: 2px; font-size: 14px; flex-wrap: wrap; }
+.account .who { font-weight: 600; padding: 0 6px; }
+.account .account-note { color: var(--ok); font-size: 13px; padding: 0 6px; }
+.account button.link { font-size: 14px; }
+.auth-banner { background: color-mix(in srgb, var(--warn) 14%, var(--surface)); border-bottom: 1px solid var(--border); }
+.auth-banner .wrap { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding-top: 8px; padding-bottom: 8px; font-size: 14px; }
+.auth-banner button { padding: 5px 12px; font-size: 14px; }
+.auth-dialog {
+  border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text);
+  width: min(420px, calc(100vw - 32px)); padding: 20px;
+}
+.auth-dialog::backdrop { background: rgba(0, 0, 0, .45); }
+.auth-dialog .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.auth-dialog .dialog-actions button.primary { margin-top: 0; }

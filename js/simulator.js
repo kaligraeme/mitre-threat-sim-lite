@@ -1424,6 +1424,7 @@
   // ---------- boot ----------
 
   async function init() {
+    if (window.Auth && !Auth.session()) return;   // signed out: auth.js is sending this page to sign-in
     let metas = [];
     try { metas = await AttackDB.getAllMeta(); } catch (e) { console.error(e); }
     if (!metas.length) { $('#noData').hidden = false; return; }
