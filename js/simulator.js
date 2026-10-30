@@ -1,4 +1,4 @@
-/* simulator.js — threat profile builder + ATT&CK mapping dashboard. */
+/* simulator.js — threat profile builder + ATT&CK and ATLAS mapping dashboard. */
 (function () {
   'use strict';
 
@@ -34,15 +34,24 @@
   const fmtN = n => (n ?? 0).toLocaleString();
   const plural = (n, one, many) => fmtN(n) + ' ' + (n === 1 ? one : many);
   const pct = (a, b) => b ? Math.round((a / b) * 100) + '%' : '0%';
-  const domainLabel = id => (AttackDB.DOMAINS.find(d => d.id === id) || { label: id }).label;
+  const domainInfo = id => AttackDB.DOMAINS.find(d => d.id === id) || { id, label: id, title: id, family: 'attack' };
+  const domainLabel = id => domainInfo(id).label;          // Enterprise, ICS, ATLAS
+  const domainTitle = id => domainInfo(id).title;          // Enterprise ATT&CK, ICS ATT&CK, ATLAS
+  const familyOf = id => domainInfo(id).family;            // attack | atlas
+  const familyName = id => AttackDB.FAMILIES[familyOf(id)].name;   // ATT&CK | ATLAS
   const byName = (a, b) => (a.name || '').localeCompare(b.name || '');
   const byAttackId = (a, b) => String(a.attackId).localeCompare(String(b.attackId), undefined, { numeric: true });
 
-  /** Minimal, safe rendering of ATT&CK description markdown (links, code, bullets; citations stripped). */
+  /**
+   * Minimal, safe rendering of ATT&CK and ATLAS description markdown (links, code, bullets).
+   * ATT&CK (Citation: …) and ATLAS [[ref]] markers are stripped; ATLAS's site-relative links
+   * (/software/AML.S0001) point at atlas.mitre.org (ATT&CK text has none).
+   */
   function md(text) {
     const frag = document.createDocumentFragment();
     if (!text) return frag;
-    const clean = text.replace(/\s*\(Citation:[^)]*\)/g, '').trim();
+    const clean = text.replace(/\s*\(Citation:[^)]*\)/g, '').replace(/\[\[[^\]]*\]\]/g, '')
+      .replace(/\]\((\/[^)\s]*)\)/g, '](https://atlas.mitre.org$1)').trim();
     const inline = (s, parent) => {
       const re = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)|`([^`]+)`|\*\*([^*]+)\*\*/g;
       let last = 0, m;
@@ -83,9 +92,13 @@
 
   const STORE_KEY = 'threatsim.sim.v1';
   const PICK_TABS = [
-    { key: 'groups', label: 'Groups', kind: 'group', one: 'Group' },
-    { key: 'software', label: 'Software', kind: 'software', one: 'Software' },
-    { key: 'campaigns', label: 'Campaigns', kind: 'campaign', one: 'Campaign' },
+    { key: 'groups', family: 'attack', label: 'Groups', kind: 'group', one: 'Group' },
+    { key: 'software', family: 'attack', label: 'Software', kind: 'software', one: 'Software' },
+    { key: 'campaigns', family: 'attack', label: 'Campaigns', kind: 'campaign', one: 'Campaign' },
+    // ATLAS threat intelligence, in ATLAS's own categories
+    { key: 'caseStudies', family: 'atlas', label: 'Case studies', kind: 'case-study', one: 'Case study' },
+    { key: 'entities', family: 'atlas', label: 'Entities', kind: 'entity', one: 'Entity' },
+    { key: 'atlasSoftware', family: 'atlas', label: 'Software', kind: 'software', one: 'Software' },
   ];
   const STATUS = {
     covered:   { label: 'Mitigated + detected', icon: '✓' },
@@ -96,17 +109,22 @@
   const EXAMPLES = [
     ['groups', 'G0016'], ['groups', 'G1017'], ['groups', 'G0034'],
     ['campaigns', 'C0028'], ['software', 'S0604'], ['groups', 'G1015'],
+    ['caseStudies', 'AML.CS0069'], ['caseStudies', 'AML.CS0035'], ['atlasSoftware', 'AML.S0015'],
   ];
+  // ATT&CK domains a saved profile could have known before ATLAS was added
+  const PRE_ATLAS_DOMAINS = ['enterprise-attack', 'ics-attack', 'mobile-attack'];
 
   const state = {
     models: {},
     available: [],
     domains: new Set(),
-    selection: { groups: new Set(), software: new Set(), campaigns: new Set() },
+    selection: { groups: new Set(), software: new Set(), campaigns: new Set(),
+                 caseStudies: new Set(), entities: new Set(), atlasSoftware: new Set() },
     opts: { viaSoftware: true, viaCampaigns: true, platforms: new Set() },
     inPlace: { mitigations: new Set(), detections: new Set() },
     ui: {
-      pickTab: 'groups', search: '', matchDesc: false, swType: '', swPlatform: '', campSince: '',
+      pickFamily: 'attack', pickTab: 'groups', lastTab: {}, search: '', matchDesc: false,
+      swType: '', swPlatform: '', swCategory: '', csType: '', entType: '', campSince: '',
       tab: 'matrix', matrixDomain: null, colorMode: 'usage', showAll: false, filter: '', sort: {},
     },
     results: [],
@@ -119,11 +137,12 @@
   function persist() {
     const s = {
       domains: [...state.domains],
+      known: [...state.available],   // domains pulled when this was saved; ones pulled later start switched on
       selection: Object.fromEntries(Object.entries(state.selection).map(([k, v]) => [k, [...v]])),
       opts: { viaSoftware: state.opts.viaSoftware, viaCampaigns: state.opts.viaCampaigns, platforms: [...state.opts.platforms] },
       inPlace: { mitigations: [...state.inPlace.mitigations], detections: [...state.inPlace.detections] },
-      ui: { pickTab: state.ui.pickTab, tab: state.ui.tab, colorMode: state.ui.colorMode, showAll: state.ui.showAll,
-            matrixDomain: state.ui.matrixDomain, matchDesc: state.ui.matchDesc },
+      ui: { pickFamily: state.ui.pickFamily, pickTab: state.ui.pickTab, lastTab: state.ui.lastTab, tab: state.ui.tab,
+            colorMode: state.ui.colorMode, showAll: state.ui.showAll, matrixDomain: state.ui.matrixDomain, matchDesc: state.ui.matchDesc },
     };
     try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch (_) { /* storage unavailable */ }
   }
@@ -132,7 +151,11 @@
     let s = null;
     try { s = JSON.parse(localStorage.getItem(STORE_KEY)); } catch (_) {}
     if (!s) return false;
-    if (Array.isArray(s.domains)) state.domains = new Set(s.domains.filter(d => state.available.includes(d)));
+    if (Array.isArray(s.domains)) {
+      const known = Array.isArray(s.known) ? s.known : PRE_ATLAS_DOMAINS;
+      const added = state.available.filter(d => !known.includes(d) && domainInfo(d).enabled !== false);
+      state.domains = new Set([...s.domains.filter(d => state.available.includes(d)), ...added]);
+    }
     for (const k of Object.keys(state.selection)) state.selection[k] = new Set((s.selection && s.selection[k]) || []);
     if (s.opts) {
       state.opts.viaSoftware = s.opts.viaSoftware !== false;
@@ -144,10 +167,29 @@
       state.inPlace.detections = new Set(s.inPlace.detections || []);
     }
     if (s.ui) Object.assign(state.ui, s.ui);
+    if (!state.ui.lastTab || typeof state.ui.lastTab !== 'object') state.ui.lastTab = {};
     return true;
   }
 
   const activeModels = () => state.available.filter(d => state.domains.has(d)).map(d => state.models[d]);
+  /** Knowledge bases with a domain switched on, ATT&CK first. */
+  const activeFamilies = () => Object.keys(AttackDB.FAMILIES).filter(f => activeModels().some(m => familyOf(m.domain) === f));
+
+  /** Platforms each knowledge base's techniques name (ATT&CK: Windows, Linux…; ATLAS: Generative AI…). */
+  function familyPlatforms(family) {
+    const out = new Set();
+    for (const m of Object.values(state.models)) {
+      if (familyOf(m.domain) !== family) continue;
+      for (const t of m.byKind.technique || []) for (const p of t.platforms || []) if (p !== 'None') out.add(p);
+    }
+    return out;
+  }
+  /** The platform filter as it applies to one domain: only the selected platforms of its knowledge base,
+   *  so picking Windows narrows ATT&CK without emptying ATLAS, and the reverse. */
+  const platformsFor = domain => {
+    const own = familyPlatforms(familyOf(domain));
+    return new Set([...state.opts.platforms].filter(p => own.has(p)));
+  };
 
   /** First active-domain record for a STIX id (falls back to any loaded domain). */
   function entity(id) {
@@ -162,12 +204,12 @@
     const out = {};
     for (const tab of PICK_TABS) {
       const map = new Map();
-      for (const m of activeModels()) {
+      for (const m of activeModels().filter(x => familyOf(x.domain) === tab.family)) {
         for (const o of m.byKind[tab.kind] || []) {
           let e = map.get(o.id);
           if (!e) map.set(o.id, e = { obj: o, domains: [], techCount: 0 });
           e.domains.push(m.domain);
-          e.techCount = Math.max(e.techCount, SimEngine.directTechniqueCount(m, o.id));
+          e.techCount = Math.max(e.techCount, SimEngine.documentedTechniqueCount(m, o));
         }
       }
       out[tab.key] = [...map.values()];
@@ -179,7 +221,7 @@
 
   function analyze() {
     state.results = activeModels()
-      .map(m => SimEngine.analyzeDomain(m, state.selection, Object.assign({ resolve: entity }, state.opts)))
+      .map(m => SimEngine.analyzeDomain(m, state.selection, Object.assign({ resolve: entity }, state.opts, { platforms: platformsFor(m.domain) })))
       .filter(r => r.roots.length);
     for (const r of state.results) {
       r.statusCounts = SimEngine.applyPosture(r, state.inPlace);
@@ -213,33 +255,64 @@
         cb.checked ? state.domains.add(d) : state.domains.delete(d);
         state.catalogs = null;
         renderPlatforms();
+        renderScopeLabels();
         renderPickerFilters();
         update();
       });
-      return el('label', { class: 'chipbox' }, cb, domainLabel(d) + ' ATT&CK');
+      return el('label', { class: 'chipbox' }, cb, domainTitle(d));
     }));
     $('#dataVersion').textContent = state.available
       .map(d => domainLabel(d) + ' v' + state.models[d].meta.version).join(' · ');
   }
 
-  function renderPickerFilters() {
-    const tab = state.ui.pickTab;
-    $('#swType').hidden = tab !== 'software';
-    $('#swPlatform').hidden = tab !== 'software';
-    $('#campSince').hidden = tab !== 'campaigns';
+  /** Keep the picker on a knowledge base that is switched on, and on one of its tabs. */
+  function syncPickTab() {
+    const fams = activeFamilies();
+    if (fams.length && !fams.includes(state.ui.pickFamily)) state.ui.pickFamily = fams[0];
+    const tabs = PICK_TABS.filter(t => t.family === state.ui.pickFamily);
+    if (!tabs.some(t => t.key === state.ui.pickTab)) {
+      const last = state.ui.lastTab[state.ui.pickFamily];
+      state.ui.pickTab = tabs.some(t => t.key === last) ? last : tabs[0].key;
+    }
+    state.ui.lastTab[state.ui.pickFamily] = state.ui.pickTab;
+  }
 
-    const plats = new Set();
-    for (const e of catalogs().software) for (const p of e.obj.platforms || []) plats.add(p);
-    const swp = $('#swPlatform');
-    swp.replaceChildren(el('option', { value: '', text: 'Any platform' }), ...[...plats].sort().map(p => el('option', { value: p, text: p })));
-    swp.value = plats.has(state.ui.swPlatform) ? state.ui.swPlatform : '';
+  /** Options for a picker select, from the values the current catalog actually has. */
+  function fillSelect(sel, anyText, values, current, label = v => v) {
+    sel.replaceChildren(el('option', { value: '', text: anyText }), ...values.map(v => el('option', { value: v, text: label(v) })));
+    sel.value = values.includes(current) ? current : '';
+    return sel.value;
+  }
+
+  function renderPickerFilters() {
+    syncPickTab();
+    const tab = state.ui.pickTab;
+    const isSoftware = tab === 'software' || tab === 'atlasSoftware';
+    $('#swType').hidden = !isSoftware;
+    $('#swPlatform').hidden = tab !== 'software';
+    $('#swCategory').hidden = tab !== 'atlasSoftware';
+    $('#csType').hidden = tab !== 'caseStudies';
+    $('#entType').hidden = tab !== 'entities';
+    $('#campSince').hidden = tab !== 'campaigns' && tab !== 'caseStudies';
+
+    const cat = catalogs();
+    const values = (rows, f) => [...new Set(rows.flatMap(e => [].concat(f(e.obj) || [])))].sort((a, b) => a.localeCompare(b));
+    state.ui.swPlatform = fillSelect($('#swPlatform'), 'Any platform', values(cat.software, o => o.platforms), state.ui.swPlatform);
+    state.ui.swCategory = fillSelect($('#swCategory'), 'Any category', values(cat.atlasSoftware, o => o.softwareCategories), state.ui.swCategory,
+      v => v.replace(/-/g, ' ').replace(/\bai\b/g, 'AI'));
+    state.ui.csType = fillSelect($('#csType'), 'Incidents & exercises', values(cat.caseStudies, o => o.caseType), state.ui.csType, v => v + 's');
+    state.ui.entType = fillSelect($('#entType'), 'Any entity type', values(cat.entities, o => o.entityType), state.ui.entType);
 
     const cs = $('#campSince');
     const now = new Date().getFullYear();
-    cs.replaceChildren(el('option', { value: '', text: 'Active any time' }),
-      ...[1, 2, 3, 5, 10].map(n => el('option', { value: String(now - n), text: 'Active since ' + (now - n) })));
+    const word = tab === 'caseStudies' ? 'Dated' : 'Active';
+    cs.replaceChildren(el('option', { value: '', text: word + ' any time' }),
+      ...[1, 2, 3, 5, 10].map(n => el('option', { value: String(now - n), text: word + ' since ' + (now - n) })));
     cs.value = state.ui.campSince;
   }
+
+  /** Last year a campaign or case study was active; an ATLAS case study with no end date is ongoing. */
+  const lastActive = obj => (obj.kind === 'case-study' && obj.firstSeen && !obj.lastSeen ? new Date().toISOString() : obj.lastSeen || obj.firstSeen);
 
   function filteredCatalog() {
     const tab = state.ui.pickTab;
@@ -250,29 +323,46 @@
           .filter(Boolean).join(' ').toLowerCase();
         if (!terms.every(t => hay.includes(t))) return false;
       }
-      if (tab === 'software') {
+      if (tab === 'software' || tab === 'atlasSoftware') {
         if (state.ui.swType && obj.softwareType !== state.ui.swType) return false;
-        if (state.ui.swPlatform && !(obj.platforms || []).includes(state.ui.swPlatform)) return false;
+        if (tab === 'software' && state.ui.swPlatform && !(obj.platforms || []).includes(state.ui.swPlatform)) return false;
+        if (tab === 'atlasSoftware' && state.ui.swCategory && !(obj.softwareCategories || []).includes(state.ui.swCategory)) return false;
       }
-      if (tab === 'campaigns' && state.ui.campSince) {
-        const last = obj.lastSeen || obj.firstSeen;
+      if (tab === 'caseStudies' && state.ui.csType && obj.caseType !== state.ui.csType) return false;
+      if (tab === 'entities' && state.ui.entType && obj.entityType !== state.ui.entType) return false;
+      if ((tab === 'campaigns' || tab === 'caseStudies') && state.ui.campSince) {
+        const last = lastActive(obj);
         if (!last || new Date(last).getFullYear() < Number(state.ui.campSince)) return false;
       }
       return true;
     });
-    if (tab === 'campaigns') rows.sort((a, b) => String(b.obj.lastSeen || '').localeCompare(String(a.obj.lastSeen || '')));
+    if (tab === 'campaigns' || tab === 'caseStudies') rows.sort((a, b) => String(lastActive(b.obj) || '').localeCompare(String(lastActive(a.obj) || '')) || byName(a.obj, b.obj));
     else rows.sort((a, b) => byName(a.obj, b.obj));
     return rows;
   }
 
   function renderPicker() {
-    $('#pickTabs').replaceChildren(...PICK_TABS.map(t => el('button', {
+    syncPickTab();
+    const fams = activeFamilies();
+    const famHost = $('#pickFamily');
+    famHost.hidden = fams.length < 2;
+    famHost.replaceChildren(...fams.map(f => {
+      const n = PICK_TABS.filter(t => t.family === f).reduce((sum, t) => sum + state.selection[t.key].size, 0);
+      return el('button', {
+        'aria-pressed': String(state.ui.pickFamily === f),
+        on: { click: () => { state.ui.pickFamily = f; state.ui.pickTab = null; renderPickerFilters(); renderPicker(); persist(); } },
+      }, AttackDB.FAMILIES[f].name + ' ', el('span', { class: 'count', text: n ? '(' + n + ')' : '' }));
+    }));
+    $('#pickTabs').setAttribute('aria-label', AttackDB.FAMILIES[state.ui.pickFamily].name + ' threat categories');
+    $('#pickTabs').replaceChildren(...PICK_TABS.filter(t => t.family === state.ui.pickFamily).map(t => el('button', {
       role: 'tab', 'aria-selected': String(state.ui.pickTab === t.key),
       on: { click: () => { state.ui.pickTab = t.key; renderPickerFilters(); renderPicker(); persist(); } },
     }, t.label + ' ', el('span', { class: 'count', text: state.selection[t.key].size ? '(' + state.selection[t.key].size + ')' : '' }))));
 
     const rows = filteredCatalog();
     const sel = state.selection[state.ui.pickTab];
+    // domain badges only when this knowledge base has more than one domain switched on (Enterprise + ICS)
+    const familyDomains = activeModels().filter(m => familyOf(m.domain) === state.ui.pickFamily).length;
     $('#pickShown').textContent = fmtN(rows.length) + ' shown';
     const list = $('#pickList');
     if (!rows.length) {
@@ -286,42 +376,72 @@
         update();
       });
       const aliases = (obj.aliases || []).filter(a => a !== obj.name);
-      let metaText = obj.attackId || '';
-      if (state.ui.pickTab === 'software') metaText += ' · ' + obj.softwareType;
-      if (state.ui.pickTab === 'campaigns' && (obj.firstSeen || obj.lastSeen)) {
-        const y = s => s ? new Date(s).getFullYear() : '?';
-        metaText += ' · ' + y(obj.firstSeen) + '–' + y(obj.lastSeen);
-      }
-      if (aliases.length) metaText += ' · ' + aliases.join(', ');
+      const metaText = [obj.attackId, ...pickMeta(obj), aliases.join(', ')].filter(Boolean).join(' · ');
       return el('label', { class: 'pick', role: 'option', 'aria-selected': String(sel.has(obj.id)) },
         cb,
-        el('span', { class: 'nm' }, obj.name, domains.length < state.domains.size || state.domains.size > 1
-          ? domains.map(d => el('span', { class: 'dbadge', text: domainLabel(d) })) : null),
-        el('span', { class: 'tc', title: 'Techniques used directly', text: techCount + ' TTPs' }),
+        el('span', { class: 'nm' }, obj.name, familyDomains > 1 ? domains.map(d => el('span', { class: 'dbadge', text: domainLabel(d) })) : null),
+        el('span', { class: 'tc', title: obj.kind === 'entity' ? 'Techniques it used, including in the case studies attributed to it' : 'Techniques used directly',
+          text: techCount + ' TTPs' }),
         el('span', { class: 'meta', title: metaText, text: metaText }),
       );
     }));
   }
 
-  function renderPlatforms() {
-    const counts = new Map();
-    for (const m of activeModels()) {
-      for (const t of m.byKind.technique || []) for (const p of t.platforms || []) {
-        if (p !== 'None') counts.set(p, (counts.get(p) || 0) + 1);
-      }
+  /** Short facts for a picker row (after the ID, before aliases). */
+  function pickMeta(obj) {
+    const y = s => (s ? new Date(s).getUTCFullYear() : '?');
+    const span = (a, b) => (y(a) === y(b) ? String(y(a)) : y(a) + '–' + y(b));
+    switch (obj.kind) {
+      case 'software': return [obj.softwareType, (obj.softwareCategories || []).join(', ')];
+      case 'campaign': return [obj.firstSeen || obj.lastSeen ? y(obj.firstSeen) + '–' + y(obj.lastSeen) : null];
+      case 'case-study': return [obj.caseType, obj.firstSeen ? (obj.lastSeen ? span(obj.firstSeen, obj.lastSeen) : y(obj.firstSeen) + '–ongoing') : null];
+      case 'entity': return [obj.entityType];
+      default: return [];
     }
-    const plats = [...counts.keys()].sort((a, b) => counts.get(b) - counts.get(a));
-    for (const p of [...state.opts.platforms]) if (!counts.has(p)) state.opts.platforms.delete(p);
-    $('#platGrid').replaceChildren(...plats.map(p => {
-      const cb = el('input', { type: 'checkbox', checked: state.opts.platforms.has(p) });
-      cb.addEventListener('change', () => {
-        cb.checked ? state.opts.platforms.add(p) : state.opts.platforms.delete(p);
-        renderPlatformSummary();
-        update({ picker: false });
-      });
-      return el('label', {}, cb, p);
-    }));
+  }
+
+  function renderPlatforms() {
+    // one group per knowledge base switched on; each group filters only its own domains (platformsFor)
+    const groups = activeFamilies().map(f => {
+      const counts = new Map();
+      for (const m of activeModels().filter(x => familyOf(x.domain) === f)) {
+        for (const t of m.byKind.technique || []) for (const p of t.platforms || []) {
+          if (p !== 'None') counts.set(p, (counts.get(p) || 0) + 1);
+        }
+      }
+      return { f, plats: [...counts.keys()].sort((a, b) => counts.get(b) - counts.get(a)) };
+    });
+    const all = new Set(groups.flatMap(g => g.plats));
+    for (const p of [...state.opts.platforms]) if (!all.has(p)) state.opts.platforms.delete(p);
+    $('#platGrid').replaceChildren(...groups.flatMap(g => [
+      groups.length > 1 ? el('div', { class: 'plat-h', text: AttackDB.FAMILIES[g.f].name }) : null,
+      ...g.plats.map(p => {
+        const cb = el('input', { type: 'checkbox', checked: state.opts.platforms.has(p) });
+        cb.addEventListener('change', () => {
+          cb.checked ? state.opts.platforms.add(p) : state.opts.platforms.delete(p);
+          renderPlatformSummary();
+          update({ picker: false });
+        });
+        return el('label', {}, cb, p);
+      }),
+    ]));
     renderPlatformSummary();
+  }
+
+  /** Scope options name the threat types of the knowledge bases switched on. */
+  function renderScopeLabels() {
+    const f = activeFamilies();
+    const attack = f.includes('attack'), atlas = f.includes('atlas');
+    $('#optSoftwareHint').textContent = attack && atlas
+      ? 'Add techniques from software linked to selected groups, campaigns, entities and case studies'
+      : atlas ? 'Add techniques from software linked to selected entities and case studies'
+        : 'Add techniques from malware and tools linked to selected groups and campaigns';
+    $('#optCampaignsLabel').textContent = attack && atlas ? 'Include attributed campaigns and case studies'
+      : atlas ? 'Include attributed case studies' : 'Include attributed campaigns';
+    $('#optCampaignsHint').textContent = attack && atlas
+      ? 'Add techniques from campaigns attributed to selected groups, and case studies attributed to selected entities'
+      : atlas ? 'Add techniques from case studies attributed to selected entities'
+        : 'Add techniques from campaigns attributed to selected groups';
   }
 
   function renderPlatformSummary() {
@@ -340,10 +460,13 @@
     if (has && !state.results.length) {
       $('#emptyProfile').hidden = false;
       $('#emptyProfile').querySelector('p').textContent =
-        'None of the selected adversaries appear in the domains you have switched on. Turn on another domain or pick different adversaries.';
+        'None of the selected threats appear in the domains you have switched on. Turn on another domain or pick different threats.';
     } else {
+      const f = activeFamilies();
+      const what = [f.includes('attack') ? 'ATT&CK groups, software or campaigns' : null, f.includes('atlas') ? 'ATLAS case studies, entities or software' : null]
+        .filter(Boolean).join(', or ');
       $('#emptyProfile').querySelector('p').textContent =
-        'Pick groups, software or campaigns on the left. You\'ll see the ATT&CK techniques they use, and the mitigations and detections that apply to them.';
+        'Pick ' + what + ' on the left. You\'ll see the techniques they use, and the mitigations and detections that apply to them.';
     }
     if (!has || !state.results.length) { renderExamples(); return; }
     renderKpis();
@@ -355,20 +478,20 @@
     const host = $('#examples');
     host.replaceChildren();
     for (const [key, attackId] of EXAMPLES) {
-      const kind = PICK_TABS.find(t => t.key === key).kind;
-      const found = state.available
-        .map(d => [d, (state.models[d].byKind[kind] || []).find(x => x.attackId === attackId)])
+      const tab = PICK_TABS.find(t => t.key === key);
+      const found = state.available.filter(d => familyOf(d) === tab.family)
+        .map(d => [d, (state.models[d].byKind[tab.kind] || []).find(x => x.attackId === attackId)])
         .filter(([, o]) => o);
       if (!found.length) continue;
       const o = found[0][1];
       host.append(el('button', {
-        title: 'In ' + found.map(([d]) => domainLabel(d)).join(' and ') + ' ATT&CK',
+        title: 'In ' + found.map(([d]) => domainTitle(d)).join(' and '),
         on: { click: () => {
           // switch on every domain the example appears in, so ICS-relevant examples show ICS too
           for (const [d] of found) state.domains.add(d);
           state.catalogs = null;
           state.selection[key].add(o.id);
-          renderDomains(); renderPlatforms(); renderPickerFilters(); update();
+          renderDomains(); renderPlatforms(); renderScopeLabels(); renderPickerFilters(); update();
         } },
       }, o.name, ...found.map(([d]) => el('span', { class: 'dbadge', text: domainLabel(d) }))));
     }
@@ -443,12 +566,16 @@
         el('span', {}, el('span', { class: 'sw', style: 'background:var(--critical)' }), STATUS.gap.label + ' ' + fmtN(t.gap))),
       noPosture ? el('div', { class: 'sub', style: 'margin-top:6px', text: 'Mark mitigations as in place and detections as deployed to simulate your coverage.' }) : null,
     );
+    // ATLAS defines no detection strategies, so its techniques can only be mitigated
+    const atlas = state.results.filter(r => familyOf(r.domain) === 'atlas').length;
+    const atlasOnly = atlas === state.results.length;
     $('#kpis').replaceChildren(
       tile('Techniques in scope', fmtN(t.tech), fmtN(t.subs) + ' sub-techniques · ' + t.tacticsHit + ' of ' + t.tacticsAll + ' tactics'),
       tile('Mitigations', fmtN(t.mit), fmtN(t.mitIn) + ' in place'),
-      tile('Detection strategies', fmtN(t.det), fmtN(t.detIn) + ' deployed'),
-      tile('Data components', fmtN(t.dc), 'telemetry the detections rely on'
-        + (t.dcShared ? ` · ${fmtN(t.dcShared)} used by more than one domain` : '')),
+      tile('Detection strategies', fmtN(t.det), atlasOnly ? 'ATLAS defines none, so ATLAS techniques rely on mitigations'
+        : fmtN(t.detIn) + ' deployed' + (atlas ? ' · ATT&CK only' : '')),
+      tile('Data components', fmtN(t.dc), atlasOnly ? 'none: ATLAS defines no detection strategies'
+        : 'telemetry the detections rely on' + (t.dcShared ? ` · ${fmtN(t.dcShared)} used by more than one domain` : '')),
       hero,
     );
   }
@@ -735,6 +862,11 @@
     }
   }
 
+  /** ATLAS has no detection strategies or telemetry: say so instead of showing an empty table. */
+  const noDetections = r => familyOf(r.domain) === 'atlas'
+    ? el('p', { class: 'hint', text: 'ATLAS defines no detection strategies, so its ' + plural(r.techniques.size, 'technique', 'techniques') + ' can be covered only by mitigations here.' })
+    : null;
+
   function renderMitigations(tools, body) {
     postureTools(tools, 'mitigations', 'in place', () => renderTabBody(renderMitigations));
     perDomain(body, r => {
@@ -750,13 +882,15 @@
         onRow: x => openDrawer(() => mitigationDrawer(x.r.domain, x.id)),
       }));
       const none = [...r.techniques.values()].filter(t => !t.mitigations.length).length;
-      if (none) body.append(el('p', { class: 'hint', text: none + ' technique' + (none === 1 ? ' has' : 's have') + ' no ATT&CK mitigation (common for pre-compromise techniques). Detection is the only lever for those.' }));
+      if (none) body.append(el('p', { class: 'hint', text: none + ' technique' + (none === 1 ? ' has' : 's have') + ' no ' + familyName(r.domain) + ' mitigation'
+        + (familyOf(r.domain) === 'atlas' ? '.' : ' (common for pre-compromise techniques). Detection is the only lever for those.') }));
     });
   }
 
   function renderDetections(tools, body) {
     postureTools(tools, 'detections', 'deployed', () => renderTabBody(renderDetections));
     perDomain(body, r => {
+      if (noDetections(r)) { body.append(noDetections(r)); return; }
       body.append(table(controlRows(r, 'detections', 'detections'), [
         ...priorityCols('detections', 'detPriority', 'Deployed'),
         { key: 'name', label: 'Detection strategy', sort: x => x.e.obj.name, render: x => x.e.obj.name },
@@ -784,6 +918,7 @@
         ? ` ${plural(unresolved.size, 'data component used by these analytics is', 'data components used by these analytics are')} not in the loaded ATT&CK data; pull Enterprise ATT&CK on the Data page to list them.`
         : '') }));
     perDomain(body, r => {
+      if (noDetections(r)) { body.append(noDetections(r)); return; }
       const rows = [...r.dataComponents].map(([id, e]) => ({ r, id, e }))
         .filter(x => matches(x.e.obj, [...x.e.logSources.keys()].join(' ')));
       body.append(table(rows, [
@@ -855,7 +990,8 @@
 
   function drawerHead(kicker, obj, extra) {
     return [
-      el('div', { class: 'kicker' }, kicker, ' · ', obj.url ? el('a', { href: obj.url, target: '_blank', rel: 'noopener', text: obj.attackId + ' on attack.mitre.org' }) : obj.attackId),
+      el('div', { class: 'kicker' }, kicker, ' · ', obj.url ? el('a', { href: obj.url, target: '_blank', rel: 'noopener',
+        text: obj.attackId + ' on ' + AttackDB.FAMILIES[familyOf(obj.domain)].site }) : obj.attackId),
       el('h2', { id: 'drawerTitle', text: obj.name }),
       extra || null,
     ];
@@ -866,6 +1002,16 @@
     cb.addEventListener('change', () => { toggleInPlace(setKey, domain, id, cb.checked); refreshDrawer(); });
     return el('label', { class: 'toggle' }, cb, label);
   }
+
+  /** ATLAS objects can name the matching ATT&CK object (e.g. an ATLAS entity for APT28 -> G0007). */
+  const attackRefLine = o => (o.attackRef ? el('div', { class: 'kicker', style: 'margin-top:4px' }, 'ATT&CK: ',
+    o.attackRef.url ? el('a', { href: o.attackRef.url, target: '_blank', rel: 'noopener', text: o.attackRef.id }) : o.attackRef.id) : null);
+
+  /** ATLAS sources: the references its [[ref]] markers point at. */
+  const referencesBlock = o => ((o.references || []).length ? el('details', { style: 'margin-top:10px' },
+    el('summary', { text: 'Sources (' + o.references.length + ')' }),
+    el('ul', { class: 'refs' }, ...o.references.map(r => el('li', {},
+      r.url && /^https?:\/\//.test(r.url) ? el('a', { href: r.url, target: '_blank', rel: 'noopener', text: r.title || r.url }) : (r.title || r.id))))) : null);
 
   const techButton = (domain, tech) => el('button', { class: 'linkish', on: { click: () => openDrawer(() => techniqueDrawer(domain, tech.id)) } },
     el('span', { class: 'mono', text: tech.attackId }), ' ', tech.name);
@@ -895,7 +1041,9 @@
       el('div', { class: 'tags', style: 'margin-top:6px' },
         tacticNames(model, tech).map(n => el('span', { class: 'tag', text: n })),
         (tech.platforms || []).map(p => el('span', { class: 'tag', text: p })),
+        tech.maturity ? el('span', { class: 'tag', title: 'ATLAS maturity: the strongest evidence of use', text: 'Maturity: ' + tech.maturity }) : null,
         t ? statusBadge(t.status) : null));
+    out.push(attackRefLine(tech));
     if (tech.parent && model.byId.get(tech.parent)) {
       out.push(el('div', { class: 'kicker', style: 'margin-top:6px' }, 'Sub-technique of ', techButton(domain, model.byId.get(tech.parent))));
     }
@@ -908,7 +1056,7 @@
         byRoot.get(g.root).push(g);
       }
       const pathText = via => (via.length
-        ? 'via ' + via.map(id => { const o = model.byId.get(id); return (o.kind === 'campaign' ? 'campaign ' : '') + o.name; }).join(' → ')
+        ? 'via ' + via.map(id => { const o = model.byId.get(id); return ({ campaign: 'campaign ', 'case-study': 'case study ' }[o.kind] || '') + o.name; }).join(' → ')
         : 'directly');
       out.push(el('section', {}, el('h3', { text: 'Used in this profile by' }), ...[...byRoot].map(([rootId, groups]) => {
         const root = model.byId.get(rootId);
@@ -922,7 +1070,7 @@
 
     const mits = model.to(techId, 'mitigates', 'mitigation');
     out.push(el('section', {}, el('h3', { text: 'Mitigations (' + mits.length + ')' }),
-      mits.length ? null : el('p', { class: 'hint', text: 'ATT&CK lists no mitigations for this technique.' }),
+      mits.length ? null : el('p', { class: 'hint', text: familyName(domain) + ' lists no mitigations for this technique.' }),
       ...mits.map(rel => {
         const m = model.byId.get(rel.source);
         return el('div', { class: 'item' },
@@ -934,10 +1082,11 @@
 
     const dets = model.to(techId, 'detects', 'detection-strategy');
     out.push(el('section', {}, el('h3', { text: 'Detection strategies (' + dets.length + ')' }),
+      familyOf(domain) === 'atlas' ? el('p', { class: 'hint', text: 'ATLAS defines no detection strategies.' }) : null,
       ...dets.map(rel => {
         const ds = model.byId.get(rel.source);
         const all = (ds.analyticRefs || []).map(id => model.byId.get(id)).filter(a => a && a.active);
-        const shown = all.filter(a => SimEngine.platformMatch(a.platforms, state.opts.platforms));
+        const shown = all.filter(a => SimEngine.platformMatch(a.platforms, platformsFor(domain)));
         return el('div', { class: 'item' },
           el('div', { class: 'hd' }, idLink(ds),
             el('button', { class: 'linkish grow', text: ds.name, on: { click: () => openDrawer(() => detectionDrawer(domain, ds.id)) } }),
@@ -965,6 +1114,12 @@
     const r = resultFor(domain);
     const e = r && r.mitigations.get(id);
     const out = drawerHead('Mitigation · ' + domainLabel(domain), m, el('div', { style: 'margin-top:6px' }, postureToggle('mitigations', domain, id, 'In place')));
+    if ((m.categories || []).length || (m.lifecyclePhases || []).length) {
+      out.push(el('div', { class: 'tags', style: 'margin-top:8px' },
+        (m.categories || []).map(c => el('span', { class: 'tag', title: 'Category', text: c })),
+        (m.lifecyclePhases || []).map(p => el('span', { class: 'tag', title: 'AI lifecycle phase', text: p }))));
+    }
+    out.push(attackRefLine(m));
     out.push(el('div', { class: 'md', style: 'margin-top:10px' }, md(m.description)));
     if (e) {
       out.push(el('section', {}, el('h3', { text: 'Profile techniques it addresses (' + e.techniques.size + ' of ' + r.techniques.size + ')' }),
@@ -979,7 +1134,7 @@
     const r = resultFor(domain);
     const e = r && r.detections.get(id);
     const all = (ds.analyticRefs || []).map(x => model.byId.get(x)).filter(a => a && a.active);
-    const shown = all.filter(a => SimEngine.platformMatch(a.platforms, state.opts.platforms));
+    const shown = all.filter(a => SimEngine.platformMatch(a.platforms, platformsFor(domain)));
     const out = drawerHead('Detection strategy · ' + domainLabel(domain), ds, el('div', { style: 'margin-top:6px' }, postureToggle('detections', domain, id, 'Deployed')));
     const analytics = el('section', {}, el('h3', { text: 'Analytics' }), analyticsBlock(model, shown, all.length - shown.length));
     analytics.querySelector('details').open = true;
@@ -1019,9 +1174,13 @@
 
   function entityDrawer(id, tab) {
     const o = entity(id);
-    const out = drawerHead(tab.one + (o.softwareType ? ' (' + o.softwareType + ')' : ''), o);
+    const out = drawerHead(tab.one + (o.softwareType ? ' (' + o.softwareType + ')' : '') + (familyOf(o.domain) === 'atlas' ? ' · ATLAS' : ''), o);
     const aliases = (o.aliases || []).filter(a => a !== o.name);
-    if (aliases.length) out.push(el('div', { class: 'kicker', style: 'margin-top:4px', text: 'Also known as ' + aliases.join(', ') }));
+    if (aliases.length) out.push(el('div', { class: 'kicker', style: 'margin-top:4px', text: (o.kind === 'entity' ? 'Associated with ' : 'Also known as ') + aliases.join(', ') }));
+    const facts = [...pickMeta(o), o.kind === 'case-study' && o.actor ? 'Actor: ' + o.actor : null, o.target ? 'Target: ' + o.target : null,
+      o.reporter ? 'Reported by ' + o.reporter : null].filter(Boolean);
+    if (familyOf(o.domain) === 'atlas' && facts.length) out.push(el('div', { class: 'tags', style: 'margin-top:6px' }, facts.map(f => el('span', { class: 'tag', text: f }))));
+    out.push(attackRefLine(o));
     const contrib = state.results.map(r => {
       let n = 0;
       for (const t of r.techniques.values()) if (t.roots.has(id)) n++;
@@ -1029,6 +1188,7 @@
     }).filter(Boolean);
     if (contrib.length) out.push(el('p', { class: 'hint', text: 'Contributes ' + contrib.join(' · ') + ' to this profile.' }));
     out.push(el('div', { class: 'md', style: 'margin-top:10px' }, md(o.description)));
+    out.push(referencesBlock(o));
     out.push(el('p', {}, el('button', { text: 'Remove from profile', on: { click: () => { state.selection[tab.key].delete(id); closeDrawer(); update(); } } })));
     return out;
   }
@@ -1070,7 +1230,8 @@
       opts: Object.assign({}, state.opts, { platforms: new Set(state.opts.platforms) }),
       selection: Object.fromEntries(Object.entries(state.selection).map(([k, v]) => [k, new Set(v)])),
       showAll: state.ui.showAll,
-      kinds: PICK_TABS, entity, domainLabel,
+      kinds: PICK_TABS, entity, domainLabel, domainInfo,
+      platformsByDomain: Object.fromEntries(state.results.map(r => [r.domain, [...platformsFor(r.domain)]])),
       generatedAt: new Date(),
     };
     Object.assign(exportUi, { busy: true, msg: '', err: false });
@@ -1130,18 +1291,20 @@
         const p = r.model.byId.get(pid);
         if (p) entries.push({ techniqueID: p.attackId, enabled: true, showSubtechniques: true });
       }
+      // ATLAS layers open in the ATLAS Navigator (domain atlas-atlas), as ATLAS publishes its own
+      const atlas = familyOf(r.domain) === 'atlas';
       const layer = {
         name: 'ThreatSim: ' + profileName(),
-        versions: { attack: String(r.model.meta.version).split('.')[0], navigator: '5.1.0', layer: '4.5' },
-        domain: r.domain,
-        description: 'Generated by ThreatSim from ATT&CK v' + r.model.meta.version + '. ' + (coverage ? 'Colored by simulated coverage.' : 'Score = number of selected adversaries using the technique.'),
+        versions: atlas ? { navigator: '5.3.2', layer: '4.5' } : { attack: String(r.model.meta.version).split('.')[0], navigator: '5.1.0', layer: '4.5' },
+        domain: atlas ? 'atlas-atlas' : r.domain,
+        description: 'Generated by ThreatSim from ' + familyName(r.domain) + ' v' + r.model.meta.version + '. ' + (coverage ? 'Colored by simulated coverage.' : 'Score = number of selected adversaries using the technique.'),
         sorting: 3,
         layout: { layout: 'side', showID: true, showName: true },
         hideDisabled: false,
         techniques: entries,
         gradient: { colors: ['#cde2fb', '#104281'], minValue: 0, maxValue: max },
         legendItems: coverage ? Object.entries(STATUS).filter(([k]) => k !== 'detected').map(([k, s]) => ({ label: k === 'mitigated' ? 'Partial (mitigated or detected)' : s.label, color: colors[k] })) : [],
-        metadata: [{ name: 'profile', value: profileName() }],
+        metadata: [{ name: 'profile', value: profileName() }].concat(atlas ? [{ name: 'atlas_data_version', value: String(r.model.meta.version) }] : []),
         selectTechniquesAcrossTactics: true,
         selectSubtechniquesWithParent: false,
       };
@@ -1179,6 +1342,9 @@
     $('#pickDesc').addEventListener('change', e => { state.ui.matchDesc = e.target.checked; persist(); renderPicker(); });
     $('#swType').addEventListener('change', e => { state.ui.swType = e.target.value; renderPicker(); });
     $('#swPlatform').addEventListener('change', e => { state.ui.swPlatform = e.target.value; renderPicker(); });
+    $('#swCategory').addEventListener('change', e => { state.ui.swCategory = e.target.value; renderPicker(); });
+    $('#csType').addEventListener('change', e => { state.ui.csType = e.target.value; renderPicker(); });
+    $('#entType').addEventListener('change', e => { state.ui.entType = e.target.value; renderPicker(); });
     $('#campSince').addEventListener('change', e => { state.ui.campSince = e.target.value; renderPicker(); });
     $('#pickAll').addEventListener('click', () => {
       const sel = state.selection[state.ui.pickTab];
@@ -1197,6 +1363,7 @@
 
     renderDomains();
     renderPlatforms();
+    renderScopeLabels();
     renderPickerFilters();
     update();
   }

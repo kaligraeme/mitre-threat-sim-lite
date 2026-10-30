@@ -187,6 +187,14 @@
   const byName = (a, b) => String(a.name || '').localeCompare(String(b.name || ''));
   const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
 
+  const KB_NAMES = { attack: 'ATT&CK', atlas: 'ATLAS' };
+  /** The knowledge bases a workbook covers: 'ATT&CK', 'ATLAS' or 'ATT&CK and ATLAS'. */
+  const kbList = P => [...new Set(P.domains.map(D => D.kb))].join(' and ') || 'ATT&CK';
+  const workbookTitle = P => kbList(P) + ' threat readiness workpaper';
+  /** A release date; ATLAS gives plain days ('2026-10-28'), shown as written rather than shifted to local time. */
+  const fmtDay = s => new Date(s).toLocaleDateString(undefined,
+    /^\d{4}-\d{2}-\d{2}$/.test(String(s)) ? { dateStyle: 'medium', timeZone: 'UTC' } : { dateStyle: 'medium' });
+
   const MAX_CELL = 32000;   // Excel's limit is 32,767 characters per cell
 
   /** Text that is valid XML 1.0 and fits in a cell. */
@@ -217,15 +225,17 @@
   }
 
   /**
-   * ATT&CK description markdown flattened to one line of plain text: citations, links, emphasis,
-   * headings, <br> and entities removed; list items become "• "; code spans kept as written.
+   * ATT&CK and ATLAS description markdown flattened to one line of plain text: citations (ATT&CK
+   * "(Citation: …)", ATLAS "[[ref]]"), links (incl. ATLAS site-relative ones), emphasis, headings,
+   * <br> and entities removed; list items become "• "; code spans kept as written.
    */
   function plain(md) {
     if (!md) return '';
     const spans = [];
     const t = decodeEntities(String(md)
       .replace(/\s*\(Citation:[^)]*\)/g, '')
-      .replace(/\[([^\]]+)\]\((?:https?:\/\/[^)\s]+)\)/g, '$1')
+      .replace(/\[\[[^\]]*\]\]/g, '')
+      .replace(/\[([^\]]+)\]\((?:https?:\/\/|\/)[^)\s]*\)/g, '$1')
       .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<\/?code>/gi, '')
       .replace(/`([^`]+)`/g, (_, c) => '\u0001' + (spans.push(c) - 1) + '\u0002')
@@ -306,8 +316,11 @@
       const total = r.techniques.size;
       const techList = [...r.techniques.values()];
 
+      const info = ctx.domainInfo ? ctx.domainInfo(r.domain) : { title: label + ' ATT&CK', family: 'attack' };
       const D = {
         domain: r.domain, label, result: r, total, keyOf,
+        title: info.title, family: info.family, kb: KB_NAMES[info.family] || 'ATT&CK',   // 'Enterprise ATT&CK' / 'ATLAS'; kb 'ATT&CK' / 'ATLAS'
+        platforms: ctx.platformsByDomain ? ctx.platformsByDomain[r.domain] || [] : null,
         version: m.meta.version, released: m.meta.modified,
         counts: { covered: 0, mitigated: 0, detected: 0, gap: 0 },
         subs: 0, tacticsHit: 0, tacticsAll: m.tactics.length, noMitigation: 0,
@@ -682,7 +695,7 @@
     }
   }
 
-  function writeControls(ws, rows, L, LMap, kind) {
+  function writeControls(ws, rows, L, LMap, kind, P) {
     const isMit = kind === 'mit';
     const V = isMit ? MIT : DET;
     const k = key => '$' + L.letter(key);
@@ -691,7 +704,8 @@
       // Techniques this control maps to that no in-place control of the same type covers yet
       open: rn => F(`COUNTIFS(${LMap.range('ctlKey')},${k('key')}${rn},${LMap.range('techCovered')},"No")`, row.openNow),
     }));
-    writeTable(ws, L, out, { freezeCols: 5, emptyNote: isMit ? 'No ATT&CK mitigations map to this threat profile.' : 'No detection strategies map to this threat profile.' });
+    writeTable(ws, L, out, { freezeCols: 5, emptyNote: isMit ? 'No mitigations map to this threat profile.'
+      : 'No detection strategies map to this threat profile.' + (P.domains.some(D => D.family === 'atlas') ? ' ATLAS defines no detection strategies.' : '') });
     const prio = priorities();
     const st = L.letter('status');
     equalsRule(ws, `${st}2:${st}${L.last}`, V.on, C.goodTint, C.goodInk, prio);
@@ -767,7 +781,7 @@
     });
 
     // Title and legends
-    put(ws, 1, 1, `${D.label} ATT&CK v${D.version} — threat profile matrix`, { font: font({ size: 14, bold: true }) });
+    put(ws, 1, 1, `${D.title} v${D.version} — threat profile matrix`, { font: font({ size: 14, bold: true }) });
     put(ws, 2, 1, clean(`Profile: ${profileNames(ctx)}. ${ctx.showAll ? 'All techniques are shown; grey ones are not used by the profile.' : 'Profile techniques only; grey parents give context for their sub-techniques.'}`),
       { font: font({ color: { argb: C.muted } }) });
 
@@ -974,14 +988,14 @@
     for (const D of P.domains) for (const k of Object.keys(all)) all[k] += D.counts[k];
 
     // Title block
-    text(row, 1, 'ATT&CK threat readiness workpaper', { size: 18, bold: true });
+    text(row, 1, workbookTitle(P), { size: 18, bold: true });
     ws.getRow(row).height = 28;
     row++;
     const profileLine = clean('Threat profile: ' + profileNames(ctx));
     merged(row, 1, LAST_COL, profileLine, { font: font({ size: 12, bold: true }), alignment: { wrapText: true, vertical: 'top' } }, 17 * lines(profileLine, 150) + 2);
     row++;
     const when = P.generated.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-    text(row, 1, clean(`Generated ${when} with ThreatSim · ` + P.domains.map(D => `${D.label} ATT&CK v${D.version}`).join(' · ')), { color: { argb: C.muted } });
+    text(row, 1, clean(`Generated ${when} with ThreatSim · ` + P.domains.map(D => `${D.title} v${D.version}`).join(' · ')), { color: { argb: C.muted } });
     row += 2;
     merged(row, 1, 8, 'How to use this workpaper: set each mitigation\'s Implementation status (In Place / Not In Place) on the Mitigations sheet, '
       + 'and each detection strategy\'s Deployment status (Deployed / Not Deployed) on the Detections sheet, using the yellow drop-down cells '
@@ -1017,7 +1031,7 @@
     const T = key => LT.range(key);
     const scopeRows = [];
     if (P.domains.length > 1) scopeRows.push({ label: 'All domains', domain: null, counts: all, total: totalTech });
-    for (const D of P.domains) scopeRows.push({ label: D.label + ' ATT&CK', domain: D.label, counts: D.counts, total: D.total });
+    for (const D of P.domains) scopeRows.push({ label: D.title, domain: D.label, counts: D.counts, total: D.total });
     const firstScope = row;
     for (const s of scopeRows) {
       const count = status => (s.domain
@@ -1041,14 +1055,15 @@
     blockStarts.push([row, 1]);
     headerRow(['Controls', 'Mapped', 'In place / deployed', 'Not yet', 'Share in place'], legendRuns('Progress (live)', [[C.good, 'In place / deployed'], [C.muted, 'Not yet', '□']]));
     const ctlRows = [];
-    const addCtl = (label, perDomain, L, on, totalKey, onKey) => {
+    const addCtl = (label, perDomain, L, on, totalKey, onKey, domains = P.domains) => {
       ctlRows.push({ label, L, on, total: sum(totalKey), now: sum(onKey) });
       if (P.domains.length > 1) {
-        for (const D of P.domains) ctlRows.push({ label: `  ${D.label} ${perDomain}`, L, on, domain: D.label, total: D[totalKey], now: D[onKey] });
+        for (const D of domains) ctlRows.push({ label: `  ${D.label} ${perDomain}`, L, on, domain: D.label, total: D[totalKey], now: D[onKey] });
       }
     };
     addCtl('Mitigations in place', 'mitigations', LM, MIT.on, 'mitTotal', 'mitOn');
-    addCtl('Detection strategies deployed', 'detection strategies', LD, DET.on, 'detTotal', 'detOn');
+    // ATLAS defines no detection strategies, so it gets no per-domain row here
+    addCtl('Detection strategies deployed', 'detection strategies', LD, DET.on, 'detTotal', 'detOn', P.domains.filter(D => D.family !== 'atlas'));
     const firstCtl = row;
     for (const c of ctlRows) {
       const R = key => c.L.range(key);
@@ -1091,7 +1106,8 @@
         const noun = isMit ? 'mitigation' : 'detection strategy', nouns = isMit ? 'mitigations' : 'detection strategies';
         if (!list.length) {
           const off = total - on;
-          note(!total ? `${D.label}: no ATT&CK ${nouns} map to this profile's techniques.`
+          note(!total ? (!isMit && D.family === 'atlas' ? `${D.label}: detection strategies are not part of ATLAS, so its techniques can only be mitigated.`
+            : `${D.label}: no ${D.kb} ${nouns} map to this profile's techniques.`)
             : on === total ? (total === 1 ? `${D.label}: the only ${noun} was already ${V.on} at export.` : `${D.label}: all ${total} ${nouns} were already ${V.on} at export.`)
             : isMit ? `${D.label}: the ${plural(off, noun, nouns)} not ${V.on} at export ${off === 1 ? 'addresses' : 'address'} no technique that is still unmitigated.`
             : `${D.label}: the ${plural(off, noun, nouns)} not ${V.on} at export ${off === 1 ? 'covers' : 'cover'} no technique that is still undetected.`);
@@ -1115,8 +1131,8 @@
         const shown = list.filter(a => a.priority === lastTier).length;
         if (inTier > shown) {
           note(`${D.label}: ${inTier} ${nouns} share priority ${lastTier}; `
-            + (shown === 1 ? 'the one shown was picked by reach, documented procedure examples, then ATT&CK ID.'
-              : `the ${shown} shown are ordered by reach, documented procedure examples, then ATT&CK ID.`));
+            + (shown === 1 ? `the one shown was picked by reach, documented procedure examples, then ${D.kb} ID.`
+              : `the ${shown} shown are ordered by reach, documented procedure examples, then ${D.kb} ID.`));
         }
       }
       if (row > first) equalsRule(ws, `H${first}:H${row - 1}`, V.on, C.goodTint, C.goodInk, prio);
@@ -1131,7 +1147,7 @@
     for (const D of P.domains) {
       if (P.domains.length > 1) {
         blockStarts.push([row, 1]);
-        for (let c = 1; c <= 8; c++) put(ws, row, c, c === 1 ? `${D.label} ATT&CK` : null, { font: font({ bold: true }), fill: solid(C.idle) });
+        for (let c = 1; c <= 8; c++) put(ws, row, c, c === 1 ? D.title : null, { font: font({ bold: true }), fill: solid(C.idle) });
         row++;
       }
       const first = row;
@@ -1155,13 +1171,17 @@
 
     // ---- Profile at a glance (at export) ----
     band('Profile at a glance');
+    const hasAttack = P.domains.some(D => D.family === 'attack'), hasAtlas = P.domains.some(D => D.family === 'atlas');
     const glance = [
-      ['Adversaries in profile', P.profile.length, profileNames(ctx)],
+      ['Threats in profile', P.profile.length, profileNames(ctx)],
       ['Techniques in scope', totalTech, `${plural(sum('subs'), 'sub-technique', 'sub-techniques')} · ${sum('tacticsHit')} of ${sum('tacticsAll')} tactics`],
-      ['Techniques with no ATT&CK mitigation', sum('noMitigation'),
-        (P.domains.length > 1 ? P.domains.map(D => `${D.noMitigation} ${D.label}`).join(', ') + '. ' : '') + 'Detection is the only lever for these.'],
-      ['Mitigations mapped', sum('mitTotal'), 'ATT&CK mitigations that address at least one profile technique'],
-      ['Detection strategies mapped', sum('detTotal'), 'ATT&CK detection strategies for the profile techniques'],
+      ['Techniques with no mitigation', sum('noMitigation'),
+        (P.domains.length > 1 ? P.domains.map(D => `${D.noMitigation} ${D.label}`).join(', ') + '. ' : '')
+        + (!hasAttack ? 'ATLAS defines no detection strategies either, so these stay uncovered here.'
+          : hasAtlas ? 'Detection is the only lever for the ATT&CK ones; ATLAS defines no detection strategies.' : 'Detection is the only lever for these.')],
+      ['Mitigations mapped', sum('mitTotal'), `${kbList(P)} mitigations that address at least one profile technique`],
+      ['Detection strategies mapped', sum('detTotal'), hasAttack ? 'ATT&CK detection strategies for the profile techniques' + (hasAtlas ? ' (ATLAS defines none)' : '')
+        : 'ATLAS defines no detection strategies'],
       ['Data components (telemetry)', P.dataComponents, 'Distinct log data types the detection strategies rely on'
         + (P.dcShared > 0 ? ` (${P.dcShared} ${P.dcShared === 1 ? 'is' : 'are'} used by more than one domain and get a Telemetry row in each: ${sum('dcTotal')} rows)` : '')],
     ];
@@ -1182,7 +1202,7 @@
 
     // ---- Threat profile ----
     band('Threat profile');
-    headerRow(['Adversary', 'Type', 'ATT&CK ID', 'Domains', 'Techniques contributed', 'Aliases']);
+    headerRow(['Threat', 'Type', 'ID', 'Domains', 'Techniques contributed', 'Aliases']);
     for (const p of P.profile) {
       const top = { vertical: 'top' };
       put(ws, row, 1, link(p.obj.name, p.obj.url), { font: font({ color: { argb: C.link }, underline: true }), alignment: top });
@@ -1199,25 +1219,39 @@
     // ---- Scope and method ----
     band('Scope and method');
     const opts = ctx.opts;
-    const platforms = opts.platforms && opts.platforms.size ? [...opts.platforms].join(', ') : 'All platforms';
-    const year = P.domains.reduce((y, D) => Math.max(y, D.released ? new Date(D.released).getFullYear() : 0), 0) || new Date().getFullYear();
+    const hasAttackKb = P.domains.some(D => D.family === 'attack'), hasAtlasKb = P.domains.some(D => D.family === 'atlas');
+    // the platform filter applies per knowledge base (ThreatSim narrows each domain by its own platforms only)
+    const platforms = P.domains.some(D => D.platforms)
+      ? (P.domains.every(D => !(D.platforms || []).length) ? 'All platforms'
+        : P.domains.map(D => `${D.label}: ${(D.platforms || []).length ? D.platforms.join(', ') : 'all platforms'}`).join('; '))
+      : (opts.platforms && opts.platforms.size ? [...opts.platforms].join(', ') : 'All platforms');
+    const yearOf = D => (D.released ? new Date(D.released).getUTCFullYear() : 0);
+    const year = P.domains.filter(D => D.family === 'attack').reduce((y, D) => Math.max(y, yearOf(D)), 0) || P.generated.getFullYear();
+    const atlasYear = P.domains.filter(D => D.family === 'atlas').reduce((y, D) => Math.max(y, yearOf(D)), 0) || P.generated.getFullYear();
+    const attributed = [hasAttackKb ? 'campaigns attributed to selected groups' : null, hasAtlasKb ? 'case studies attributed to selected entities' : null].filter(Boolean).join(' and ');
     const method = [
-      ['ATT&CK data', P.domains.map(D => `${D.label} ATT&CK v${D.version}` + (D.released ? ` (released ${new Date(D.released).toLocaleDateString(undefined, { dateStyle: 'medium' })})` : '')).join('; ')],
-      ['Scope', `Techniques used by the selected adversaries. Software they use: ${opts.viaSoftware ? 'included' : 'not included'}. Campaigns attributed to selected groups: ${opts.viaCampaigns ? 'included' : 'not included'}. Platforms: ${platforms}.`],
+      ['Data', P.domains.map(D => `${D.title} v${D.version}` + (D.released ? ` (released ${fmtDay(D.released)})` : '')).join('; ')],
+      ['Scope', `Techniques used by the selected threats. Software they use: ${opts.viaSoftware ? 'included' : 'not included'}. `
+        + `${attributed.charAt(0).toUpperCase() + attributed.slice(1)}: ${opts.viaCampaigns ? 'included' : 'not included'}. Platforms: ${platforms}.`],
       ['Readiness', 'Share of profile techniques with at least one mitigation In Place or detection strategy Deployed. Fully covered means both. Partial means one of the two.'],
       ['Coverage', 'A technique is mitigated when any mitigation mapped to it on the Control Map sheet is In Place, and detected when any detection strategy mapped to it is Deployed.'],
       ['(live) and (at export)', 'Figures marked (live) are formulas that recalculate when you change a status. Figures marked (at export), including priorities, were fixed when ThreatSim exported this workbook. "Status at export" keeps the original statuses, and "Changed since export" flags the rows you have edited.'],
-      ['Priority', 'Ranked by ThreatSim at export: each step picks the control covering the most still-uncovered techniques, weighting techniques used by more selected adversaries higher. The weighted score is the sum, over the techniques a pick newly covers, of the number of selected adversaries using each. Controls with equal scores share a priority number and are listed by reach, documented procedure examples, then ATT&CK ID. Adds is how many techniques a pick newly covers; Cumulative is the share covered once it is added. To re-rank after editing statuses here, set the same statuses in ThreatSim and export again (owners, dates and notes are not carried over).'],
+      ['Priority', 'Ranked by ThreatSim at export: each step picks the control covering the most still-uncovered techniques, weighting techniques used by more selected adversaries higher. The weighted score is the sum, over the techniques a pick newly covers, of the number of selected adversaries using each. Controls with equal scores share a priority number and are listed by reach, documented procedure examples, then ID. Adds is how many techniques a pick newly covers; Cumulative is the share covered once it is added. To re-rank after editing statuses here, set the same statuses in ThreatSim and export again (owners, dates and notes are not carried over).'],
       ['Sheets', 'Matrix: techniques by tactic, shaded by usage, with a live status column. Techniques: every profile technique with live coverage. '
         + 'Mitigations and Detections: set statuses here (yellow drop-downs), with owner, target date and notes. ICS Assets: assets targeted by ICS techniques and how exposed they are. '
         + 'Telemetry: data components and log sources the detection strategies rely on. Analytics: every analytic and what to look for in each log source. '
         + 'Control Map: each technique-to-control link the coverage formulas use.'],
-      ['Limits', 'ATT&CK does not enumerate every adversary behaviour, and some techniques have no ATT&CK mitigation. Readiness here measures coverage of ATT&CK mappings, not overall security.'],
-      ['ATT&CK licence', `© ${year} The MITRE Corporation. This work is reproduced and distributed with the permission of The MITRE Corporation. `
+      ['Limits', `${kbList(P)} ${hasAttackKb && hasAtlasKb ? 'do' : 'does'} not enumerate every adversary behaviour, and some techniques have no mitigation. `
+        + (hasAtlasKb ? 'ATLAS defines no detection strategies, so ATLAS techniques can be mitigated but not detected here. ' : '')
+        + `Readiness here measures coverage of ${kbList(P)} mappings, not overall security.`],
+      hasAttackKb ? ['ATT&CK licence', `© ${year} The MITRE Corporation. This work is reproduced and distributed with the permission of The MITRE Corporation. `
         + 'License: The MITRE Corporation (MITRE) hereby grants you a non-exclusive, royalty-free license to use ATT&CK® for research, development, and commercial purposes. '
         + 'Any copy you make for such purposes is authorized provided that you reproduce MITRE\'s copyright designation and this license in any such copy. '
-        + 'MITRE ATT&CK and ATT&CK are registered trademarks of The MITRE Corporation. Source: https://github.com/mitre-attack/attack-stix-data'],
-    ];
+        + 'MITRE ATT&CK and ATT&CK are registered trademarks of The MITRE Corporation. Source: https://github.com/mitre-attack/attack-stix-data'] : null,
+      hasAtlasKb ? ['ATLAS licence', `© 2021–${atlasYear} The MITRE Corporation. MITRE ATLAS data is licensed under the Apache License, Version 2.0 `
+        + '(https://www.apache.org/licenses/LICENSE-2.0); it is distributed on an "AS IS" basis, without warranties or conditions of any kind. '
+        + 'MITRE ATLAS and ATLAS are trademarks of The MITRE Corporation. Source: https://github.com/mitre-atlas/atlas-data'] : null,
+    ].filter(Boolean);
     for (const [label, value] of method) {
       put(ws, row, 1, label, { font: font({ bold: true }), alignment: { vertical: 'top' } });
       merged(row, 2, 8, clean(value), { font: font(), alignment: { wrapText: true, vertical: 'top' } }, 15 * lines(value, 95) + 3);
@@ -1271,7 +1305,7 @@
     wb.lastModifiedBy = 'ThreatSim';
     wb.created = P.generated;
     wb.modified = P.generated;
-    wb.title = 'ATT&CK threat readiness workpaper';
+    wb.title = workbookTitle(P);
     wb.subject = clean('Threat profile: ' + profileNames(ctx));
     wb.calcProperties.fullCalcOnLoad = true;
 
@@ -1297,8 +1331,8 @@
     writeSummary(summary, ctx, P, { T: LT, M: LM, D: LD });
     P.domains.forEach((D, i) => writeMatrix(matrices[i], D, ctx, LT));
     writeTechniques(techniques, P, LT, LMap);
-    writeControls(mitigations, P.mitigations, LM, LMap, 'mit');
-    writeControls(detections, P.detections, LD, LMap, 'det');
+    writeControls(mitigations, P.mitigations, LM, LMap, 'mit', P);
+    writeControls(detections, P.detections, LD, LMap, 'det', P);
     writeAssets(assets, P, LA, LT);
     writeTelemetry(telemetry, P, LTel, LD);
     writeAnalytics(analytics, P, LAn, LD);

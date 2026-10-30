@@ -1,4 +1,4 @@
-/* data-manager.js — UI for checking and pulling MITRE ATT&CK releases into AttackDB. */
+/* data-manager.js — UI for checking and pulling MITRE ATT&CK and ATLAS releases into AttackDB. */
 (function () {
   'use strict';
 
@@ -15,7 +15,9 @@
   };
 
   const SELECTED_KEY = 'threatsim.selectedDomains';
+  const KNOWN_KEY = 'threatsim.knownDomains';   // domains this page offered when the selection was saved
   const DISPLAY_KINDS = Object.keys(AttackDB.KIND_LABELS);
+  const domainOf = id => AttackDB.DOMAINS.find(d => d.id === id) || { id, label: id, title: id, family: 'attack' };
 
   const state = {
     upstream: null,          // result of fetchUpstreamIndex()
@@ -27,18 +29,29 @@
   };
 
   function loadSelected() {
+    const defaults = AttackDB.DOMAINS.filter(d => d.enabled).map(d => d.id);
     try {
       const v = JSON.parse(localStorage.getItem(SELECTED_KEY));
-      if (Array.isArray(v)) return new Set(v);
+      if (Array.isArray(v)) {
+        let known = JSON.parse(localStorage.getItem(KNOWN_KEY));
+        if (!Array.isArray(known)) known = ['enterprise-attack', 'ics-attack', 'mobile-attack'];   // saved before ATLAS was added
+        // a domain added since the selection was saved starts switched on, like on a first visit
+        return new Set([...v, ...defaults.filter(id => !known.includes(id))]);
+      }
     } catch (_) { /* storage unavailable */ }
-    return new Set(AttackDB.DOMAINS.filter(d => d.enabled).map(d => d.id));
+    return new Set(defaults);
   }
   function saveSelected() {
-    try { localStorage.setItem(SELECTED_KEY, JSON.stringify([...state.selected])); } catch (_) {}
+    try {
+      localStorage.setItem(SELECTED_KEY, JSON.stringify([...state.selected]));
+      localStorage.setItem(KNOWN_KEY, JSON.stringify(AttackDB.DOMAINS.map(d => d.id)));
+    } catch (_) {}
   }
 
   const fmtDate = s => s ? new Date(s).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '—';
-  const fmtDay = s => s ? new Date(s).toLocaleDateString(undefined, { dateStyle: 'medium' }) : '—';
+  // ATLAS release dates are plain days ('2026-10-28'): show them as written, not shifted to the local time zone
+  const fmtDay = s => s ? new Date(s).toLocaleDateString(undefined,
+    /^\d{4}-\d{2}-\d{2}$/.test(s) ? { dateStyle: 'medium', timeZone: 'UTC' } : { dateStyle: 'medium' }) : '—';
   const fmtMB = n => (n / 1048576).toFixed(1) + ' MB';
   const fmtN = n => (n ?? 0).toLocaleString();
 
@@ -113,7 +126,8 @@
       });
 
       const kv = el('dl', { class: 'kv' },
-        el('dt', { text: 'Stored' }), el('dd', { text: meta ? 'v' + meta.version + ' · released ' + fmtDay(meta.modified) : 'nothing yet' }),
+        el('dt', { text: 'Stored' }), el('dd', { text: meta ? 'v' + meta.version + ' · released ' + fmtDay(meta.modified)
+          + (meta.formatVersion ? ' · format ' + meta.formatVersion : '') : 'nothing yet' }),
         el('dt', { text: 'Pulled' }), el('dd', { text: meta ? fmtDate(meta.pulledAt) : '—' }),
         el('dt', { text: 'Latest' }), el('dd', { text: up ? 'v' + up.latest.version + ' · released ' + fmtDay(up.latest.modified) : '—' }),
         el('dt', { text: 'Pull' }), el('dd', {}, sel),
@@ -122,10 +136,11 @@
       const card = el('div', { class: 'card', id: 'card-' + d.id },
         el('div', { class: 'card-head' },
           chk,
-          el('label', { for: 'sel-' + d.id }, el('h2', { text: d.label + ' ATT&CK' })),
+          el('label', { for: 'sel-' + d.id }, el('h2', { text: d.title })),
           el('span', { class: 'pill ' + st.cls, text: st.text }),
         ),
         kv,
+        d.note ? el('p', { class: 'card-note', text: d.note }) : '',
         el('div', { class: 'progress', id: 'prog-' + d.id, hidden: '' }, el('div')),
         el('div', { class: 'stage', id: 'stage-' + d.id }),
       );
@@ -170,7 +185,7 @@
     const kinds = [...DISPLAY_KINDS, 'relationships'].filter(k => domains.some(d => state.meta[d.id].counts[k]));
     const rows = kinds.map(k => el('tr', {},
       el('td', { text: AttackDB.KIND_LABELS[k] || 'Relationships' }),
-      ...domains.map(d => el('td', { class: 'num', text: fmtN(state.meta[d.id].counts[k]) })),
+      ...domains.map(d => el('td', { class: 'num', text: state.meta[d.id].counts[k] == null ? '—' : fmtN(state.meta[d.id].counts[k]) })),
     ));
     t.replaceChildren(el('thead', {}, head), el('tbody', {}, ...rows));
   }
@@ -236,7 +251,8 @@
         const idCell = el('td', { class: 'mono' });
         if (o.url) idCell.append(el('a', { href: o.url, target: '_blank', rel: 'noopener', text: o.attackId || '—' }));
         else idCell.textContent = o.attackId || '—';
-        const kindText = o.kind === 'software' ? 'Software (' + o.type + ')' : (AttackDB.KIND_LABELS[o.kind] || o.kind).replace(/s$/, '');
+        const kindText = o.kind === 'software' ? 'Software (' + (o.softwareType || o.type) + ')'
+          : o.kind === 'case-study' ? 'Case study' : o.kind === 'entity' ? 'Entity' : (AttackDB.KIND_LABELS[o.kind] || o.kind).replace(/s$/, '');
         return el('tr', {}, idCell, el('td', { text: o.name || '' }), el('td', { text: kindText }), el('td', { text: label(o.domain) }));
       })),
     );
@@ -260,12 +276,14 @@
     try {
       state.upstream = await AttackDB.fetchUpstreamIndex();
       const outdated = AttackDB.DOMAINS.filter(d => state.selected.has(d.id) && needsPull(d.id));
-      setGlobal(outdated.length
+      const failed = Object.entries(state.upstream.errors || {})
+        .map(([fam, msg]) => 'Could not reach the ' + AttackDB.FAMILIES[fam].name + ' release list (' + msg + ').');
+      setGlobal([outdated.length
         ? 'New data available for ' + outdated.map(d => d.label).join(', ') + '.'
-        : 'Checked ' + fmtDate(new Date().toISOString()) + ' — everything selected is current.',
-        outdated.length ? 'warn' : 'ok');
+        : 'Checked ' + fmtDate(new Date().toISOString()) + ' — everything selected is current.', ...failed].join(' '),
+        failed.length ? 'err' : outdated.length ? 'warn' : 'ok');
     } catch (e) {
-      setGlobal('Could not reach MITRE index: ' + e.message, 'err');
+      setGlobal('Could not reach the MITRE release lists: ' + e.message, 'err');
     }
     renderCards();
     renderToolbar();
@@ -324,35 +342,48 @@
     });
 
     prog.classList.add('indeterminate');
-    setStage('Parsing ' + fmtMB(text.length) + ' of STIX…');
+    const atlas = domainOf(domainId).family === 'atlas';
+    setStage('Parsing ' + fmtMB(text.length) + (atlas ? ' of YAML…' : ' of STIX…'));
     await nextFrame();
-    const bundle = JSON.parse(text);
-    if (bundle.type !== 'bundle' || !Array.isArray(bundle.objects)) throw new Error('Not a STIX bundle');
+    let normalized;
+    const formatMeta = {};
+    if (atlas) {
+      const doc = AttackDB.parseYaml(text);
+      const v = doc && doc.collection && doc.collection.version != null ? String(doc.collection.version) : null;
+      if (v !== target.version) throw new Error('File reports v' + v + ', expected v' + target.version);
+      setStage('Normalizing ATLAS v' + v + '…');
+      await nextFrame();
+      normalized = AttackDB.normalizeAtlas(domainId, doc);
+      formatMeta.formatVersion = String(doc['format-version']);
+    } else {
+      const bundle = JSON.parse(text);
+      if (bundle.type !== 'bundle' || !Array.isArray(bundle.objects)) throw new Error('Not a STIX bundle');
 
-    const collection = bundle.objects.find(o => o.type === 'x-mitre-collection');
-    if (collection && collection.x_mitre_version && collection.x_mitre_version !== target.version) {
-      throw new Error('Bundle reports v' + collection.x_mitre_version + ', expected v' + target.version);
+      const collection = bundle.objects.find(o => o.type === 'x-mitre-collection');
+      if (collection && collection.x_mitre_version && collection.x_mitre_version !== target.version) {
+        throw new Error('Bundle reports v' + collection.x_mitre_version + ', expected v' + target.version);
+      }
+
+      setStage('Normalizing ' + fmtN(bundle.objects.length) + ' objects…');
+      await nextFrame();
+      normalized = AttackDB.normalizeBundle(domainId, bundle);
+      formatMeta.attackSpecVersion = collection ? collection.x_mitre_attack_spec_version : null;
     }
-
-    setStage('Normalizing ' + fmtN(bundle.objects.length) + ' objects…');
-    await nextFrame();
-    const normalized = AttackDB.normalizeBundle(domainId, bundle);
 
     setStage('Writing to local database…');
     await nextFrame();
     const prev = state.meta[domainId];
-    const metaRow = {
+    const metaRow = Object.assign({
       domain: domainId,
       version: target.version,
       modified: target.modified,
       url: target.url,
       collectionId: up.collectionId,
-      attackSpecVersion: collection ? collection.x_mitre_attack_spec_version : null,
       pulledAt: new Date().toISOString(),
       bytes: text.length,
       previousVersion: prev ? prev.version : null,
       counts: normalized.counts,
-    };
+    }, formatMeta);
     await AttackDB.replaceDomain(domainId, normalized, metaRow);
     state.meta[domainId] = metaRow;
 
@@ -394,7 +425,7 @@
   }
 
   async function clearDb() {
-    if (!confirm('Delete all locally stored ATT&CK data and pull history?')) return;
+    if (!confirm('Delete all locally stored ATT&CK and ATLAS data and pull history?')) return;
     await AttackDB.clearAll();
     state.meta = {};
     renderCards();

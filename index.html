@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ATT&amp;CK Data Manager</title>
+<title>ATT&amp;CK and ATLAS Data</title>
 <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
 <header>
   <div class="wrap">
-    <div class="brand">Threat<span>Sim</span> · ATT&amp;CK</div>
+    <div class="brand">Threat<span>Sim</span> · ATT&amp;CK · ATLAS</div>
     <nav>
       <a href="index.html" aria-current="page">Data</a>
       <a href="simulator.html">Simulator</a>
@@ -18,12 +18,14 @@
 </header>
 
 <main class="wrap">
-  <h1>MITRE ATT&amp;CK data</h1>
+  <h1>MITRE ATT&amp;CK and ATLAS data</h1>
   <p class="sub">
-    Pulls the official STIX 2.1 bundles from
+    Pulls the official ATT&amp;CK STIX 2.1 bundles from
     <a href="https://github.com/mitre-attack/attack-stix-data" target="_blank" rel="noopener">mitre-attack/attack-stix-data</a>
-    into a local database in this browser. The simulator reads groups, software, campaigns, techniques,
-    mitigations and detection strategies from here.
+    and the ATLAS release files from
+    <a href="https://github.com/mitre-atlas/atlas-data" target="_blank" rel="noopener">mitre-atlas/atlas-data</a>
+    into a local database in this browser. The simulator reads adversaries (ATT&amp;CK groups, software and campaigns;
+    ATLAS case studies, entities and software), techniques, mitigations and detection strategies from here.
   </p>
 
   <div class="toolbar">
@@ -44,7 +46,7 @@
     <h2>Browse the local data</h2>
     <div class="card">
       <div class="search-row">
-        <input id="q" type="search" placeholder="Search name, ATT&CK ID or alias — e.g. APT28, T1059, Sandworm, Industroyer">
+        <input id="q" type="search" placeholder="Search name, ID or alias — e.g. APT28, T1059, Industroyer, AML.T0051, prompt injection">
         <select id="qDomain"></select>
         <select id="qKind"></select>
       </div>
@@ -67,10 +69,12 @@
 <footer>
   <div class="wrap">
     MITRE ATT&amp;CK® data © The MITRE Corporation, used under the ATT&amp;CK Terms of Use.
+    MITRE ATLAS™ data © The MITRE Corporation, used under the Apache License 2.0.
     Data stays in this browser's IndexedDB (<code>mitre-attack-db</code>).
   </div>
 </footer>
 
+<script src="js/vendor/js-yaml.min.js"></script>
 <script src="js/attack-db.js"></script>
 <script src="js/data-manager.js"></script>
 </body>

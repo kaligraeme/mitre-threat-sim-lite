@@ -1,14 +1,17 @@
 /*
- * attack-db.js — local MITRE ATT&CK data instance (IndexedDB).
+ * attack-db.js — local MITRE ATT&CK and ATLAS data instance (IndexedDB).
  *
  * Shared by every page of the threat simulator. Exposes a global `AttackDB`
  * (classic script, so pages also work when opened straight from file://).
  *
+ * ATT&CK domains come from the STIX 2.1 bundles; ATLAS comes from its YAML export (format v6),
+ * normalized into the same records so the simulator treats every domain alike.
+ *
  * Stores
  *   meta           one row per domain: version, source URL, pulled-at, counts
- *   objects        normalized STIX objects, key "<domain>|<stix id>"
- *   relationships  normalized STIX relationships, key "<domain>|<stix id>"
- *   raw            original STIX objects (incl. relationships), key "<domain>|<stix id>"
+ *   objects        normalized objects, key "<domain>|<id>" (STIX id, or ATLAS ID such as AML.T0051)
+ *   relationships  normalized relationships, key "<domain>|<id>"
+ *   raw            original objects (incl. relationships): {key, stix} or {key, atlas}
  *   history        append-only log of pulls
  */
 (function (global) {
@@ -18,12 +21,25 @@
   const DB_VERSION = 1;
 
   const INDEX_URL = 'https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/index.json';
+  // ATLAS publishes YAML on GitHub. dist/ATLAS-latest.yaml is a git symlink (raw.githubusercontent.com
+  // serves the link text), so releases are always read through the manifest.
+  const ATLAS_RAW = 'https://raw.githubusercontent.com/mitre-atlas/atlas-data/main/dist/';
+  const ATLAS_MANIFEST_URL = ATLAS_RAW + 'manifest.yaml';
+  const ATLAS_SITE = 'https://atlas.mitre.org/';
+
+  // Knowledge bases: ATT&CK (several domains) and ATLAS (one).
+  const FAMILIES = {
+    attack: { name: 'ATT&CK', site: 'attack.mitre.org' },
+    atlas: { name: 'ATLAS', site: 'atlas.mitre.org' },
+  };
 
   // Domains the simulator works with. Mobile is available upstream but off by default.
   const DOMAINS = [
-    { id: 'enterprise-attack', label: 'Enterprise', collection: 'Enterprise ATT&CK', enabled: true },
-    { id: 'ics-attack',        label: 'ICS',        collection: 'ICS ATT&CK',        enabled: true },
-    { id: 'mobile-attack',     label: 'Mobile',     collection: 'Mobile ATT&CK',     enabled: false },
+    { id: 'enterprise-attack', label: 'Enterprise', title: 'Enterprise ATT&CK', family: 'attack', collection: 'Enterprise ATT&CK', enabled: true },
+    { id: 'ics-attack',        label: 'ICS',        title: 'ICS ATT&CK',        family: 'attack', collection: 'ICS ATT&CK',        enabled: true },
+    { id: 'mobile-attack',     label: 'Mobile',     title: 'Mobile ATT&CK',     family: 'attack', collection: 'Mobile ATT&CK',     enabled: false },
+    { id: 'atlas',             label: 'ATLAS',      title: 'ATLAS',             family: 'atlas',  collection: 'ATLAS',             enabled: true,
+      note: 'Threats to AI systems. Case studies cover every release; entities and software start with v2026.10.' },
   ];
 
   // STIX type -> simulator "kind"
@@ -47,8 +63,10 @@
   const KIND_LABELS = {
     'technique': 'Techniques',
     'group': 'Groups',
+    'entity': 'Entities',
     'software': 'Software',
     'campaign': 'Campaigns',
+    'case-study': 'Case studies',
     'mitigation': 'Mitigations',
     'detection-strategy': 'Detection strategies',
     'analytic': 'Analytics',
@@ -250,6 +268,191 @@
     return { objects, relationships, raw, counts };
   }
 
+  // ---------- ATLAS (YAML export, format v6) ----------
+
+  /** YAML text -> plain data. CORE_SCHEMA has only JSON types, so dates stay strings. Needs js/vendor/js-yaml.min.js. */
+  function parseYaml(text) {
+    if (!global.jsyaml) throw new Error('YAML parser not loaded (js/vendor/js-yaml.min.js)');
+    return global.jsyaml.load(text, { schema: global.jsyaml.CORE_SCHEMA });
+  }
+
+  // ATLAS sections and the kind each becomes here (case studies and entities keep their ATLAS names)
+  const ATLAS_SECTIONS = [
+    ['tactics', 'tactic'], ['techniques', 'technique'], ['mitigations', 'mitigation'],
+    ['case-studies', 'case-study'], ['entities', 'entity'], ['software', 'software'],
+  ];
+  const ATLAS_ROUTES = {
+    tactic: 'tactics', technique: 'techniques', mitigation: 'mitigations',
+    'case-study': 'studies', entity: 'entities', software: 'software',
+  };
+  // ATLAS relationship types the simulator traverses, in the ATT&CK vocabulary it already uses.
+  // Others keep their names (achieves, sequences, reported-by); reported-by is provenance, not attribution.
+  const ATLAS_REL_TYPES = { employs: 'uses', implements: 'uses', uses: 'uses', specializes: 'subtechnique-of' };
+  // ATLAS's own STIX export uses the lower-cased tactic name as the kill-chain phase
+  const tacticSlug = name => String(name || '').toLowerCase().replace(/ /g, '-');
+
+  /** Turn a parsed ATLAS v6 export into {objects, relationships, raw, rawField, counts}. */
+  function normalizeAtlas(domain, doc) {
+    if (!doc || typeof doc !== 'object' || !doc.collection || !doc.relationships) throw new Error('Not an ATLAS export');
+    const format = String(doc['format-version'] || '');
+    if (format.split('.')[0] !== '6') throw new Error('Unsupported ATLAS format ' + (format || '(none)') + ' (expected 6.x)');
+
+    const objects = [];
+    const raw = [];   // [id, original object]
+    const objIndex = new Map();
+    const record = (o, kind) => {
+      const ref = o['attack-reference'];
+      return {
+        key: domain + '|' + o.id,
+        domain,
+        id: o.id,
+        type: o['object-type'] || kind,
+        kind,
+        attackId: o.id,
+        url: ATLAS_ROUTES[kind] ? ATLAS_SITE + ATLAS_ROUTES[kind] + '/' + o.id : null,
+        name: o.name || null,
+        description: o.description || '',
+        created: o['created-date'] || null,
+        modified: o['modified-date'] || null,
+        version: null,
+        revoked: false,
+        deprecated: false,
+        active: true,
+        domains: [domain],
+        platforms: [],
+        references: (o.references || []).map(r => ({ id: r.id || null, title: r.title || null, url: r.url || null })),
+        attackRef: ref && ref.id ? { id: ref.id, url: ref.url || null } : null,   // the matching ATT&CK object, if any
+      };
+    };
+    const add = (rec, original) => {
+      objects.push(rec);
+      objIndex.set(rec.id, rec);
+      raw.push([rec.id, original]);
+    };
+
+    add(Object.assign(record(doc.collection, 'collection'),
+      { version: doc.collection.version != null ? String(doc.collection.version) : null, formatVersion: format }), doc.collection);
+    if (doc.matrix) add(Object.assign(record(doc.matrix, 'matrix'), { tacticRefs: [] }), doc.matrix);
+
+    for (const [section, kind] of ATLAS_SECTIONS) {
+      for (const o of Object.values(doc[section] || {})) {
+        if (!o || !o.id) continue;
+        const rec = record(o, kind);
+        switch (kind) {
+          case 'tactic':
+            rec.shortname = tacticSlug(o.name);
+            break;
+          case 'technique':
+            rec.platforms = o.platforms || [];
+            rec.maturity = o.maturity || null;
+            rec.isSubtechnique = /^AML\.T\d+\.\d+$/.test(o.id);
+            rec.parent = null;   // from specializes
+            rec.tactics = [];    // from achieves
+            break;
+          case 'mitigation':
+            rec.categories = o.categories || [];
+            rec.lifecyclePhases = o['lifecycle-phases'] || [];
+            break;
+          case 'case-study':
+            rec.caseType = o.type || null;   // Incident or Exercise
+            rec.actor = o.actor || null;
+            rec.target = o.target || null;
+            rec.reporter = o.reporter || null;
+            if (o['start-date']) {   // format 6.1: a period; no end date means it is still ongoing
+              rec.firstSeen = o['start-date'];
+              rec.lastSeen = o['end-date'] || null;
+              rec.startPrecision = o['start-date-granularity'] || null;
+              rec.endPrecision = o['end-date-granularity'] || null;
+            } else {                 // format 6.0: a single date
+              rec.firstSeen = rec.lastSeen = o.date || null;
+              rec.startPrecision = rec.endPrecision = o['date-granularity'] || null;
+            }
+            break;
+          case 'entity':
+            rec.entityType = o['entity-type'] || null;
+            rec.aliases = (o['associated-entities'] || []).map(a => a && a.name).filter(Boolean);
+            break;
+          case 'software':
+            rec.softwareType = o['software-type'] ? String(o['software-type']).toLowerCase() : null;   // tool / malware, as ATT&CK
+            rec.softwareCategories = o['software-categories'] || [];
+            rec.aliases = o.aliases || [];
+            break;
+        }
+        add(rec, o);
+      }
+    }
+
+    const relationships = [];
+    for (const [source, byType] of Object.entries(doc.relationships || {})) {
+      for (const [atlasType, list] of Object.entries(byType || {})) {
+        (list || []).forEach((r, i) => {
+          if (!r || !r.target) return;
+          const src = r.source || source;
+          const s = objIndex.get(src);
+          const t = objIndex.get(r.target);
+          const id = [src, atlasType, r.target, i].join('|');   // ATLAS relationships have no ids of their own
+          const rel = {
+            key: domain + '|' + id,
+            domain,
+            id,
+            relType: ATLAS_REL_TYPES[atlasType] || atlasType,
+            atlasType,
+            source: src,
+            target: r.target,
+            sourceKind: s ? s.kind : null,
+            targetKind: t ? t.kind : null,
+            description: r.description || '',
+            modified: null,
+            revoked: false,
+            deprecated: false,
+            active: !!s && !!t,
+          };
+          if (r.tactic) rel.tactic = r.tactic;   // case-study step: the tactic it served (ATLAS ID)
+          if (r['step-id']) rel.stepId = r['step-id'];
+          if (r['leads-to']) rel.leadsTo = r['leads-to'];
+          if (r['activity-purpose']) rel.activityPurpose = r['activity-purpose'];
+          if (r.position != null) rel.position = r.position;
+          relationships.push(rel);
+          raw.push([id, r]);
+        });
+      }
+    }
+
+    const matrix = objects.find(o => o.kind === 'matrix');
+    for (const r of relationships) {
+      if (!r.active) continue;
+      const src = objIndex.get(r.source), tgt = objIndex.get(r.target);
+      if (src.kind !== 'technique') continue;
+      if (r.atlasType === 'specializes') { src.isSubtechnique = true; src.parent = r.target; }
+      else if (r.atlasType === 'achieves' && tgt.kind === 'tactic' && !src.tactics.includes(tgt.shortname)) src.tactics.push(tgt.shortname);
+    }
+    // Releases before 2026.05 give sub-techniques no specializes link and no tactics: take the parent
+    // from the ID (AML.T0043.000 -> AML.T0043) and its tactics, as later releases do explicitly.
+    for (const o of objects) {
+      if (o.kind !== 'technique' || !o.isSubtechnique) continue;
+      if (!o.parent) {
+        const p = objIndex.get(o.id.replace(/\.\d+$/, ''));
+        if (p && p.kind === 'technique' && p.id !== o.id) o.parent = p.id;
+      }
+      if (!o.tactics.length && o.parent) o.tactics = [...objIndex.get(o.parent).tactics];
+    }
+    if (matrix) {
+      matrix.tacticRefs = relationships.filter(r => r.active && r.atlasType === 'sequences' && r.source === matrix.id)
+        .sort((a, b) => (a.position ?? 0) - (b.position ?? 0)).map(r => r.target);
+    }
+
+    const counts = {};
+    for (const o of objects) {
+      if (!o.active) continue;
+      counts[o.kind] = (counts[o.kind] || 0) + 1;
+    }
+    counts.relationships = relationships.filter(r => r.active).length;
+    counts.totalObjects = objects.length;
+    counts.totalRelationships = relationships.length;
+
+    return { objects, relationships, raw, rawField: 'atlas', counts };
+  }
+
   // ---------- writes ----------
 
   /** Atomically replace everything stored for `domain`. */
@@ -264,7 +467,8 @@
     raw.delete(domainRange(domain));
     for (const o of normalized.objects) objects.put(o);
     for (const r of normalized.relationships) rels.put(r);
-    for (const o of normalized.raw) raw.put({ key: domain + '|' + o.id, stix: o });
+    if (normalized.rawField === 'atlas') for (const [id, o] of normalized.raw) raw.put({ key: domain + '|' + id, atlas: o });
+    else for (const o of normalized.raw) raw.put({ key: domain + '|' + o.id, stix: o });
     tx.objectStore('meta').put(metaRow);
     tx.objectStore('history').add({
       domain,
@@ -328,11 +532,11 @@
     return { meta, objects, relationships };
   }
 
-  /** Original STIX object (external references, citations, etc.). */
-  async function getRaw(domain, stixId) {
+  /** Original STIX or ATLAS object (external references, citations, etc.). */
+  async function getRaw(domain, id) {
     const db = await open();
-    const row = await req(db.transaction('raw').objectStore('raw').get(domain + '|' + stixId));
-    return row ? row.stix : null;
+    const row = await req(db.transaction('raw').objectStore('raw').get(domain + '|' + id));
+    return row ? row.stix || row.atlas || null : null;
   }
 
   /** Look up by ATT&CK ID (e.g. "T1059.001", "G0007") across all or one domain. */
@@ -394,13 +598,13 @@
     return 0;
   }
 
-  /** Fetch MITRE's index.json and return {domainId: {latest, versions[]}} */
-  async function fetchUpstreamIndex() {
+  /** ATT&CK: MITRE's index.json -> {domainId: {collectionId, latest, versions[]}} */
+  async function fetchAttackIndex() {
     const res = await fetch(INDEX_URL, { cache: 'no-store' });
     if (!res.ok) throw new Error('index.json: HTTP ' + res.status);
     const idx = await res.json();
     const out = {};
-    for (const d of DOMAINS) {
+    for (const d of DOMAINS.filter(x => x.family === 'attack')) {
       const col = (idx.collections || []).find(c => c.name === d.collection);
       if (!col) continue;
       const versions = [...col.versions].sort((a, b) => compareVersions(b.version, a.version));
@@ -409,9 +613,43 @@
     return { modified: idx.modified, domains: out };
   }
 
+  /** ATLAS: dist/manifest.yaml -> {collectionId, latest, versions[]}, one entry per release in format v6. */
+  async function fetchAtlasIndex() {
+    const res = await fetch(ATLAS_MANIFEST_URL, { cache: 'no-store' });
+    if (!res.ok) throw new Error('ATLAS manifest: HTTP ' + res.status);
+    const manifest = parseYaml(await res.text());
+    if (!Array.isArray(manifest)) throw new Error('ATLAS manifest: unexpected format');
+    const versions = [];
+    for (const r of manifest) {
+      const v6 = (r && r.versions || []).find(v => v && String(v['format-version']).split('.')[0] === '6');
+      // paths are relative to dist/ (e.g. v6/ATLAS-2026.10.yaml); refuse anything else
+      if (!r.release || !v6 || !/^[\w.-]+(\/[\w.-]+)*$/.test(String(v6.path)) || String(v6.path).includes('..')) continue;
+      versions.push({ version: String(r.release), modified: r['release-date'] ? String(r['release-date']) : null,
+        url: ATLAS_RAW + v6.path, formatVersion: String(v6['format-version']) });
+    }
+    if (!versions.length) throw new Error('ATLAS manifest lists no v6 files');
+    versions.sort((a, b) => compareVersions(b.version, a.version));
+    return { collectionId: 'ATLAS', latest: versions[0], versions };
+  }
+
+  /**
+   * Latest releases of every domain: {modified, domains: {domainId: {collectionId, latest, versions[]}},
+   * errors: {attack?, atlas?}}. One source failing still returns the other; both failing throws.
+   */
+  async function fetchUpstreamIndex() {
+    const [attack, atlas] = await Promise.allSettled([fetchAttackIndex(), fetchAtlasIndex()]);
+    const out = { modified: null, domains: {}, errors: {} };
+    if (attack.status === 'fulfilled') Object.assign(out, { modified: attack.value.modified, domains: attack.value.domains });
+    else out.errors.attack = attack.reason.message;
+    if (atlas.status === 'fulfilled') out.domains.atlas = atlas.value;
+    else out.errors.atlas = atlas.reason.message;
+    if (!Object.keys(out.domains).length) throw new Error(Object.values(out.errors).join('; '));
+    return out;
+  }
+
   global.AttackDB = {
-    DB_NAME, INDEX_URL, DOMAINS, KIND_BY_TYPE, KIND_LABELS,
-    open, normalizeBundle, replaceDomain, clearAll,
+    DB_NAME, INDEX_URL, ATLAS_MANIFEST_URL, DOMAINS, FAMILIES, KIND_BY_TYPE, KIND_LABELS,
+    open, normalizeBundle, normalizeAtlas, parseYaml, replaceDomain, clearAll,
     getMeta, getAllMeta, getHistory,
     getObjects, getObject, getRaw, findByAttackId, loadDomain,
     relationshipsFrom, relationshipsTo, relationshipsByType, search,

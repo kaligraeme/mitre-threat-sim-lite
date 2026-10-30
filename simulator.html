@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ATT&amp;CK Threat Simulator</title>
+<title>ATT&amp;CK and ATLAS Threat Simulator</title>
 <link rel="stylesheet" href="css/app.css">
 <style>
   /* ---- data-viz tokens: sequential blue (usage) + status (coverage) ---- */
@@ -77,6 +77,9 @@
   details.dd summary { cursor: pointer; font-size: 14px; margin-top: 8px; }
   .plat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 10px; margin-top: 6px; font-size: 13px; }
   .plat-grid label { display: flex; gap: 6px; align-items: center; }
+  .plat-grid .plat-h { grid-column: 1 / -1; margin-top: 6px; font-size: 12px; color: var(--muted); }
+  .plat-grid .plat-h:first-child { margin-top: 0; }
+  .pick-family { margin-bottom: 8px; }
 
   /* ---- results ---- */
   .profile-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 14px; min-height: 32px; }
@@ -207,6 +210,8 @@
   .drawer details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
   .drawer .ls { width: 100%; font-size: 12.5px; margin-top: 6px; }
   .drawer .ls td { padding: 4px 6px; }
+  .drawer ul.refs { margin: 6px 0; padding-left: 20px; font-size: 13px; }
+  .drawer ul.refs li { margin: 2px 0; }
   .linkish { background: none; border: none; padding: 0; color: var(--accent); text-decoration: underline; cursor: pointer; font: inherit; text-align: left; }
   .toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); white-space: nowrap; }
 </style>
@@ -214,7 +219,7 @@
 <body>
 <header>
   <div class="wrap wide">
-    <div class="brand">Threat<span>Sim</span> · ATT&amp;CK</div>
+    <div class="brand">Threat<span>Sim</span> · ATT&amp;CK · ATLAS</div>
     <nav>
       <a href="index.html">Data</a>
       <a href="simulator.html" aria-current="page">Simulator</a>
@@ -224,8 +229,8 @@
 
 <main class="wrap wide">
   <div id="noData" class="card empty-state" hidden>
-    <h2>No ATT&amp;CK data stored yet</h2>
-    <p>Pull the Enterprise and ICS datasets first, then come back here.</p>
+    <h2>No ATT&amp;CK or ATLAS data stored yet</h2>
+    <p>Pull the Enterprise ATT&amp;CK, ICS ATT&amp;CK and ATLAS datasets first, then come back here.</p>
     <p><a href="index.html">Go to the Data page →</a></p>
   </div>
 
@@ -239,7 +244,8 @@
       </div>
 
       <div class="card">
-        <h2>Adversaries</h2>
+        <h2>Threats</h2>
+        <div class="seg pick-family" id="pickFamily" role="group" aria-label="Knowledge base" hidden></div>
         <div class="seg" role="tablist" id="pickTabs"></div>
         <div class="filters">
           <input id="pickSearch" type="search" placeholder="Filter by name, ID or alias">
@@ -248,7 +254,10 @@
             <option value="">Malware &amp; tools</option><option value="malware">Malware</option><option value="tool">Tools</option>
           </select>
           <select id="swPlatform" hidden aria-label="Software platform"></select>
-          <select id="campSince" hidden aria-label="Campaign active since"></select>
+          <select id="swCategory" hidden aria-label="Software category"></select>
+          <select id="csType" hidden aria-label="Case study type"></select>
+          <select id="entType" hidden aria-label="Entity type"></select>
+          <select id="campSince" hidden aria-label="Active since"></select>
         </div>
         <div class="list-actions">
           <span id="pickShown"></span><span class="spacer"></span>
@@ -261,9 +270,9 @@
       <div class="card">
         <h2>Scope</h2>
         <label class="opt"><input type="checkbox" id="optSoftware">
-          <span>Include software they use<small>Add techniques from malware and tools linked to selected groups and campaigns</small></span></label>
+          <span>Include software they use<small id="optSoftwareHint">Add techniques from malware and tools linked to selected groups and campaigns</small></span></label>
         <label class="opt"><input type="checkbox" id="optCampaigns">
-          <span>Include attributed campaigns<small>Add techniques from campaigns attributed to selected groups</small></span></label>
+          <span><span id="optCampaignsLabel">Include attributed campaigns</span><small id="optCampaignsHint">Add techniques from campaigns attributed to selected groups</small></span></label>
         <details class="dd" id="platDetails">
           <summary>Platforms: <span id="platSummary">all</span></summary>
           <div id="platGrid" class="plat-grid"></div>
@@ -281,7 +290,7 @@
             <button class="primary" id="exportWorkpaper" aria-disabled="false"
               title="Excel workpaper (.xlsx): executive summary, matrix, techniques, mitigations, detections, ICS assets, telemetry and analytics, with editable statuses">Export workpaper</button>
             <button id="exportCsv" title="Techniques with their mitigations, detections and coverage (.csv)">CSV</button>
-            <button id="exportNavigator" title="Layer for MITRE ATT&amp;CK Navigator, one JSON file per domain">Navigator</button>
+            <button id="exportNavigator" title="Layer for MITRE ATT&amp;CK Navigator (ATLAS Navigator for ATLAS), one JSON file per domain">Navigator</button>
           </div>
           <div id="exportStatus" class="export-status" role="status"></div>
         </div>

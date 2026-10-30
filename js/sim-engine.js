@@ -2,9 +2,9 @@
  * sim-engine.js — in-memory analysis for the threat simulator.
  *
  * Global `SimEngine`. Loads a domain from AttackDB into lookup maps, then maps a
- * threat profile (selected groups / software / campaigns) to the techniques it
- * uses, and from there to mitigations, detection strategies, telemetry and
- * (ICS) targeted assets. No DOM access here.
+ * threat profile (ATT&CK groups / software / campaigns, ATLAS case studies / entities /
+ * software) to the techniques it uses, and from there to mitigations, detection
+ * strategies, telemetry and (ICS) targeted assets. No DOM access here.
  */
 (function (global) {
   'use strict';
@@ -46,9 +46,32 @@
     return model;
   }
 
+  // Roles by kind, so ATT&CK and ATLAS threats are walked alike.
+  const ACTOR_KINDS = new Set(['group', 'entity']);            // can have campaigns attributed to them
+  const CAMPAIGN_KINDS = new Set(['campaign', 'case-study']);  // attributed to an actor
+  // Selection keys in the order their roots are listed.
+  const SELECTION_ORDER = ['groups', 'campaigns', 'software', 'caseStudies', 'entities', 'atlasSoftware'];
+
+  /** Campaigns and case studies attributed to an actor (ATLAS reported-by is provenance, so it never counts). */
+  function attributedTo(model, id) {
+    return model.to(id, 'attributed-to').filter(r => CAMPAIGN_KINDS.has(r.sourceKind))
+      .map(r => model.byId.get(r.source)).filter(c => c && c.active);
+  }
+
   /** Technique count per entity (direct "uses" only), for the picker lists. */
   function directTechniqueCount(model, id) {
     return model.from(id, 'uses', 'technique').length;
+  }
+
+  /**
+   * Picker count: techniques a threat documents itself. ATLAS entities document theirs mostly
+   * through the case studies attributed to them, so those count too; ATT&CK groups keep direct uses.
+   */
+  function documentedTechniqueCount(model, obj) {
+    if (obj.kind !== 'entity') return directTechniqueCount(model, obj.id);
+    const ids = new Set(model.from(obj.id, 'uses', 'technique').map(r => r.target));
+    for (const c of attributedTo(model, obj.id)) for (const r of model.from(c.id, 'uses', 'technique')) ids.add(r.target);
+    return ids.size;
   }
 
   function platformMatch(platforms, filter) {
@@ -59,7 +82,8 @@
 
   /**
    * Analyze one domain.
-   *  selection: { groups:Set, software:Set, campaigns:Set } of STIX ids
+   *  selection: { groups, software, campaigns, caseStudies, entities, atlasSoftware } Sets of ids;
+   *    ids from other domains are skipped, and each root's role comes from its kind
    *  opts: { viaSoftware, viaCampaigns, platforms:Set }
    */
   function analyzeDomain(model, selection, opts) {
@@ -87,17 +111,16 @@
       }
     };
 
-    for (const kind of ['groups', 'campaigns', 'software']) {
-      for (const id of selection[kind]) {
+    const seen = new Set();
+    for (const key of SELECTION_ORDER) {
+      for (const id of selection[key] || []) {
         const ent = byId.get(id);
-        if (!ent || !ent.active) continue;
+        if (!ent || !ent.active || seen.has(id)) continue;
+        seen.add(id);
         roots.push(ent);
         walk(id, id, []);
-        if (kind === 'groups' && opts.viaCampaigns) {
-          for (const r of model.to(id, 'attributed-to', 'campaign')) {
-            const camp = byId.get(r.source);
-            if (camp && camp.active) walk(id, camp.id, [camp.id]);
-          }
+        if (ACTOR_KINDS.has(ent.kind) && opts.viaCampaigns) {
+          for (const camp of attributedTo(model, id)) walk(id, camp.id, [camp.id]);
         }
       }
     }
@@ -300,5 +323,9 @@
     });
   }
 
-  global.SimEngine = { loadModel, analyzeDomain, applyPosture, prioritize, procedures, matrixColumns, directTechniqueCount, platformMatch };
+  global.SimEngine = {
+    loadModel, analyzeDomain, applyPosture, prioritize, procedures, matrixColumns,
+    directTechniqueCount, documentedTechniqueCount, attributedTo, platformMatch,
+    ACTOR_KINDS, CAMPAIGN_KINDS, SELECTION_ORDER,
+  };
 })(window);
