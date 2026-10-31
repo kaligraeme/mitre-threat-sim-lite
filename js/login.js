@@ -9,7 +9,7 @@
   const status = $('#signInStatus');
   const showPassword = $('#showPassword');
   const fields = { username: form.username, password: form.password };
-  const PAGES = ['index.html', 'simulator.html'];
+  const PAGES = ['index.html', 'simulator.html', 'threatmodel.html'];
   const PAUSE_KEY = 'threatsim.signin.pause';   // sessionStorage: a sign-in pause, across reloads
   const LOCK_MAX = 15 * 60;                     // the longest pause the server gives (seconds)
   const params = new URLSearchParams(location.search);

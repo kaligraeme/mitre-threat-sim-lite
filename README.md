@@ -10,6 +10,9 @@ Software, to the techniques they use, then to the relevant mitigations and detec
 - **Sign in** (`login.html`): the only page anyone can open without signing in.
 - **Data** (`index.html`): pull MITRE ATT&CK and ATLAS releases into the local database.
 - **Simulator** (`simulator.html`): build a threat profile and map it to mitigations and detections.
+- **Threat Modelling** (`threatmodel.html`): threat-model an architecture or network diagram with that
+  profile, to the CSA Guide to Cyber Threat Modelling, and download the threat register and the
+  data-flow diagram with threats.
 
 ## Sign-in
 
@@ -23,7 +26,8 @@ and the sign-in page says why, but the files are out.)
 - **First sign-in:** username `admin`, password `admin`. Until that password is changed, the server
   warns when it starts and every page shows a banner. **Change password** is in the page header. The
   new password needs at least 8 characters and can't be the current one, the username or `admin`.
-  Changing it ends that account's sessions in other browsers and gives this browser a new session.
+  Changing it ends that account's sessions in other browsers, and any Claude job they had running, and
+  gives this browser a new session.
 - **Sessions** are a random token in an HttpOnly cookie (SameSite=Lax, and Secure over HTTPS), kept in
   the server's memory. A session ends after 12 hours without use, or when you sign out, which also
   takes this browser's other ThreatSim tabs to the sign-in page. It also ends when the password is
@@ -36,7 +40,7 @@ and the sign-in page says why, but the files are out.)
 - **Passwords** are stored only as PBKDF2-HMAC-SHA-256 hashes (310,000 iterations, random salt) in
   `users.json` (mode 600). By default it lives outside the app folder, in `~/.local/share/threatsim`
   (`$XDG_DATA_HOME/threatsim` if that is set, `%LOCALAPPDATA%\threatsim` on Windows); `--data-dir` puts
-  it elsewhere. The server never serves anything but the app's pages, `css/` and `js/`.
+  it elsewhere. The server never serves anything but the app's pages, `css/`, `js/` and `examples/`.
 - **Forgotten password, or another account:** `python3 server.py --set-password admin` (or a new
   username) asks for a new password. You can run it while the server is running; that account's
   sessions end.
@@ -130,6 +134,147 @@ The workbook is built in the browser with [ExcelJS](https://github.com/exceljs/e
 export. ATLAS YAML is parsed with [js-yaml](https://github.com/nodeca/js-yaml) 4.3.2 (MIT,
 `js/vendor/js-yaml.min.js`, licence in `js/vendor/js-yaml.LICENSE.txt`) on the Data page.
 
+## Threat Modelling
+
+The **Threat Modelling** tab carries out cyber threat modelling to the *Guide to Cyber Threat Modelling*
+of the Cyber Security Agency of Singapore (CSA), Section 3, over an architecture or network diagram. It
+uses the threat profile built on the Simulator tab as the Sectorial Threat Profile, and produces the two
+deliverables a CSA threat model is judged on. It is a port of the `cyber-threat-modelling` skill's
+method (STRIDE-LM gates, severity scoring, ATT&CK attack modelling), driven by ThreatSim's own MITRE data.
+
+1. **Threat profile.** The groups, software and campaigns (ATT&CK) and case studies, entities and
+   software (ATLAS) picked on the Simulator tab. With no profile, a generic external attacker is assumed.
+   The Simulator's platform filter and knowledge-base switches don't apply here: techniques are matched
+   to each element's own platforms, and the profile card says so.
+2. **Architecture diagram.** Choose a file or drop it on the page:
+
+   | File | How it is read |
+   |---|---|
+   | draw.io: `.drawio` or `.xml` (compressed or not), or a draw.io `.png` / `.svg` export, which carries the diagram | Shapes are elements (CSA Figure 3: rectangle = external entity, ellipse = process, double ellipse = cluster of processes, cylinder = data store; for icons and plain boxes the style and the label decide), connectors are data flows, large dashed containers are trust zones. An element's draw.io properties (*Edit Data*) `purpose`, `sensitivity`, `auth`, `trust`, `crown_jewel`, `ai` and `type` are read as its context. A word with a connector attached is an element too, unless it reads as a note (a number, a sentence, 'Note:'); a connector that ends on another connector joins its flow, and one dropped on a zone's title ends on the zone. In a file with several pages, the page with the most data flows is read and the page says which; copy another page into a file of its own to model it. A page that is only a pasted picture is read as a picture. |
+   | PowerPoint `.pptx` | The first visible slide drawn with shapes and connectors (a hidden slide only when no visible one has a diagram), read the same way: any shape, freeform or text box with a connector attached is an element, except callouts, block arrows and numbered markers; two concentric circles are a cluster; text next to a connector, in a text box or a shape with no fill or outline, is its label. A slide that is only a picture is read as a picture. |
+   | Picture: `.png`, `.jpg`, `.gif`, `.webp` | A picture has no shapes to read. Decompose it by hand on the page, or have Claude read it when the server allows (see below). |
+   | `.json` | A decomposition saved from this page. |
+
+   **Load the example** opens `examples/sovereign-ai-architecture.drawio`: the Sovereign AI reference
+   architecture (a single picture in its source deck) re-modelled as a CSA data-flow diagram, with each
+   element's context filled in. Visio files: open them in draw.io and export as XML.
+3. **System decomposition** (CSA §3.2). Check the elements, data flows and trust zones that were read,
+   and edit them. Fill in each element's context: what it does, the data it holds, how it authenticates,
+   how far it is trusted. This drives the threats and their severity more than anything else. Elements
+   are crown jewels and AI elements when their context says so, unless you set them. **Load component
+   context** takes a JSON object keyed by element name or id, as the skill's `component_context.json`;
+   its values replace what the elements had, and the page says how many it filled in and whose it
+   replaced. The decomposition stays in this browser between visits, for the signed-in user only
+   (pictures don't), and tabs open on the page share it; **Save the decomposition** downloads it.
+   Replacing or clearing it asks first. The last ten removals, and a loaded context file, can be undone,
+   latest first, with **Undo** at the foot of the editor or Ctrl+Z (⌘Z on a Mac) outside a text field.
+4. **Threat model** (CSA §3.3), built in the browser in well under a second:
+   - **Sectorial Threat Profile.** The profile's ATT&CK techniques are grouped into themes (edge
+     exploitation, network-device compromise, virtualisation, credential abuse, cloud, implants,
+     anti-forensics, host compromise, lateral movement, data theft, disruption, supply chain, covert
+     C2). Each theme the profile uses is an item, STP-1, STP-2…, with MITRE's procedure examples as
+     its evidence. Crown-jewel theft is added, marked *extrapolated*, when the profile records none.
+   - **STRIDE-LM walk.** Every element is walked against all seven categories through the skill's two
+     gates: the structural one (STRIDE-per-element: an external entity can only be spoofed or fail to
+     be held to account; a data store can't be spoofed or elevate privilege) and the contextual one
+     (its context, its place in the flow graph, the lens). A threat event is raised where a profile
+     theme bears on the element: at most one per category, two to five per element (more for exposed
+     crown jewels). Every other applicable cell is listed as an omission for the analyst to review.
+   - **ATT&CK.** Each event cites the profile's own techniques first (◆), suited to the element (network
+     devices, ESXi, containers, cloud…), then generic STRIDE-LM ones. Mitigations (M-IDs) and detection
+     strategies with their data sources come from the same local MITRE data, so every ID is one MITRE
+     publishes.
+   - **Severity** is the skill's score: what the category costs if it lands, what is at stake (crown
+     jewel +3, sensitive data +1), exposure, and the profile agreeing. High from 6, Medium from 4. It
+     is a triage aid, not a risk rating.
+   - **Attack sequences** (the CSA Table of Attack) follow the data-flow graph, in either direction,
+     from the elements an attacker can reach (the DMZ, Internet-facing systems, supplier links) through
+     threat-event locations to the crown jewels; every crown jewel with such a route ends one, up to
+     seven. A sequence, step or threat event whose technique MITRE doesn't record for the profile's
+     actors is marked *extrapolated*, and so is a row raised with generic techniques where a profile
+     theme bears on an element but none of the actor's techniques fits it.
+   - **AI elements** (models, training, inference, feature and vector stores, agents, MLOps) also get the
+     AI pass: MAESTRO layers L1–L7 and AI threat events with MITRE ATLAS techniques, mitigations and case
+     studies, numbered after the ATT&CK locations, with AI attack sequences. It needs ATLAS pulled on the
+     Data page.
+5. **Deliverables**, both from the same run, so they can't disagree:
+   - **Threat register**, `Cyber_Threat_Modelling_Register.xlsx`: *Threat Register* (one row per threat
+     event: S/n coloured by severity, threat (STP), techniques, STRIDE-LM category, threat actor,
+     sequence of attack, threat event, component with its DFD number and zone, mitigations, detections;
+     the AI rows after a separator), *Table of Attack (CSA)*, *AI Table of Attack (MAESTRO)*, *STRIDE-LM
+     Coverage*, *Threat Profile*, *AI Threat Profile (MAESTRO)*, *MAESTRO Coverage* and *About*
+     (method, scope, verification, how to read severity, assumptions and limits, sources). No merged
+     cells, so it filters and sorts.
+   - **Data-flow diagram with threats**, `Dataflow_Diagram_with_Threats.pptx`, in the CSA design: external
+     entities as rectangles, processes as circles, clusters as double circles, data stores as cylinders,
+     data flows as arrows with their labels, trust boundaries as red dashed lines, crown jewels with a
+     yellow star, and each threat-event location as a red octagon with its DFD number. Figure 1 is the
+     whole DFD; then one slide per attack sequence, with the path highlighted and the rest faded; then
+     the AI threats and the AI attack sequences. When the diagram had positions (draw.io, PowerPoint, or
+     a picture read by Claude), the DFD keeps its layout; otherwise it is laid out in rows of zones.
+
+   The workbook is built with ExcelJS (above) and the deck with
+   [PptxGenJS](https://github.com/gitbrent/PptxGenJS) 4.0.1 (MIT, `js/vendor/pptxgen.bundle.js`, which
+   includes JSZip; licences in `js/vendor/pptxgen.LICENSE.txt`). Both load only when first needed.
+
+   The last run's results, Claude's text included, are kept in this browser for the signed-in user
+   (IndexedDB) and come back on the next visit, marked out of date if the decomposition, the profile or
+   the MITRE data has changed since. Replacing or clearing the decomposition drops them.
+
+The register and diagram are a rigorous first pass for an analyst, not a finished assessment: scope
+(CSA §3.1), existing controls and full attack scenarios remain the analyst's.
+
+### Claude (optional)
+
+If the server's operator sets `ANTHROPIC_API_KEY` and installs the Anthropic Python SDK
+(`pip install -U "anthropic>=0.108"`, Python 3.10 or later), the tab can also:
+
+- **Read the picture with Claude:** read a picture of a diagram into a decomposition, with positions
+  taken from the picture, for you to check.
+- **Have Claude write the threat events in more detail:** rewrite each event's title, sequence of
+  attack and description, and each attack sequence's narrative, for this system and this threat actor.
+
+Technique IDs, mitigations, detections and severities never come from Claude. A rewritten field is
+dropped, and the engine's own text kept, if it names an ATT&CK or ATLAS ID (technique, mitigation, group,
+software, campaign, case study) or a CVE that its event doesn't carry, or holds a link or an e-mail
+address.
+
+The detail box starts unticked; the browser remembers each user's own choice. Events and attack
+sequences Claude rewrote are marked *by Claude*, or *partly by Claude* where some of its text was refused,
+and the register's *About* sheet lists the rows holding Claude's text: review its wording before relying
+on it. An answer that isn't the shape asked for (a field of the wrong kind, a coordinate out of range)
+isn't used, and the page says so.
+
+**What is sent:** only when a signed-in user presses **Read the picture with Claude**, or runs the
+threat model with the detail box ticked: the picture, or the decomposition (element names and context)
+and the draft register text, go to Anthropic's API. Diagram text is sent as data, not instructions, and
+only answers for the events that were sent are kept. Characters a reader can't see (zero-width and bidi
+controls, tag characters, variation selectors) are left out of what is sent, and the log says how many.
+A picture is redrawn before it is sent (PNG, or JPEG if large; at most 2576 px on the long edge and 3.75
+megapixels), so the file's own metadata isn't sent. Without the key or the SDK nothing is sent anywhere
+and the controls don't appear; an SDK that fails to load, or is older than 0.108, leaves Claude off,
+and the server says why when it starts.
+
+The server uses `claude-opus-5-5` (set `THREATSIM_CLAUDE_MODEL` for another), with adaptive thinking and
+structured JSON output, and opts into Anthropic's server-side fallback, so a request a safety classifier
+declines is retried on the model Anthropic recommends for it (`THREATSIM_CLAUDE_FALLBACK=off` stops this,
+for an account or API gateway that refuses it; the start-up line says whether it is on). Calls run as
+background jobs that the page checks every few seconds, so a proxy's read timeout doesn't cut them off:
+one at a time per user (a second request waits for the first and offers to cancel it), three started at
+a time per server (at most 8 more may be uploading), and at most 100 started per user in 24 hours (set
+`THREATSIM_CLAUDE_JOBS_PER_DAY`; `0` for no limit). A picture may take as long as it needs to upload on
+a slow line while it keeps coming: after 15 seconds it must average 8 KB/s, and 30 seconds without data
+ends it. While a job runs the page shows its progress and a **Cancel** button. A job stops after 15
+minutes and keeps what it has done. Leaving the page (closing it, reloading, or going to another tab of
+the app) stops it too, and so does signing out, or a password change that ends the session that started
+it; coming back in the same browser tab, the page picks up what the job did and says what stopped it. A
+result waits on the server for 15 minutes, or until the page has used it. One enrichment holds at most
+400 threat events and 50 attack sequences: the page sends the first ones and the rest keep the engine's
+text. Each call costs money on the operator's Anthropic account; the server logs one line per job with
+how many requests were sent, answered or broken off and the tokens Anthropic reported. With systemd, put the key in an environment file that
+only root can read (`EnvironmentFile=/etc/threatsim/claude.env` holding `ANTHROPIC_API_KEY=…`). Behind
+nginx, raise `client_max_body_size` (see [Hosting](#hosting)) or larger pictures are refused.
+
 ## Run
 
 ```bash
@@ -138,7 +283,8 @@ python3 server.py
 ```
 
 Open http://localhost:8000, sign in (`admin` / `admin` the first time) and change the password. Then
-press **Pull** on the Data page. Needs Python 3.8 or later; nothing to install.
+press **Pull** on the Data page. Needs Python 3.8 or later; nothing to install. (Only the Threat
+Modelling tab's optional Claude features need more: see [Claude (optional)](#claude-optional).)
 
 Options:
 
@@ -228,6 +374,8 @@ or later can run `server.py`; only the service and proxy set-up differ.
        server_name threatsim.example.com;
        ssl_certificate     /etc/letsencrypt/live/threatsim.example.com/fullchain.pem;
        ssl_certificate_key /etc/letsencrypt/live/threatsim.example.com/privkey.pem;
+
+       client_max_body_size 10m;   # pictures sent to Claude from the Threat Modelling tab
 
        location / {
            proxy_pass http://127.0.0.1:8000;
