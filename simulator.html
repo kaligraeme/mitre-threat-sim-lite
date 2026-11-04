@@ -105,10 +105,16 @@
   .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
   .legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
 
-  .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 12px; flex-wrap: wrap; }
-  .tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 12px; color: var(--muted); }
+  /* eight tabs on one row at 1280px (results column about 868px): 14px labels, compact padding, short labels for the
+     mapping tabs. Narrower screens wrap the row so every tab stays visible; from 1280px up (where it fits even for
+     the largest profiles) it never wraps, and scrolls sideways in the rare case it is still too wide */
+  .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 12px; flex-wrap: wrap; }
+  @media (min-width: 1280px) { .tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; } }
+  .tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 10px; color: var(--muted);
+                 font-size: 14px; white-space: nowrap; flex: none; }
   .tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
-  .tabs .count { font-weight: 400; font-variant-numeric: tabular-nums; }
+  .tabs .count { font-weight: 400; font-variant-numeric: tabular-nums; font-size: 13px; }
+  .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
   /* export toolbar beside the profile (not in the tab bar, so the tabs keep one row) */
   .results-head { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: flex-start; margin-bottom: 14px; }
   .results-head .profile-bar { flex: 1 1 420px; margin-bottom: 0; }
@@ -165,6 +171,11 @@
   .data td, .data th { vertical-align: top; }
   .data th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
   .data th.sortable:hover { color: var(--text); }
+  /* the header's sort control: a button (Tab stop, Enter/Space) that reads as the header text */
+  .data th.sortable .sortbtn { font: inherit; color: inherit; background: none; border: none; border-radius: 4px; padding: 0; margin: 0;
+    cursor: pointer; text-align: inherit; white-space: nowrap; }
+  .data th.sortable .sortbtn:hover:not(:disabled) { background: none; }
+  .data th.sortable .sortbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .data th[aria-sort="ascending"]::after { content: " ▲"; font-size: 10px; }
   .data th[aria-sort="descending"]::after { content: " ▼"; font-size: 10px; }
   .data tr.click { cursor: pointer; }
@@ -223,6 +234,28 @@
   .drawer ul.refs { margin: 6px 0; padding-left: 20px; font-size: 13px; }
   .drawer ul.refs li { margin: 2px 0; }
   .linkish { background: none; border: none; padding: 0; color: var(--accent); text-decoration: underline; cursor: pointer; font: inherit; text-align: left; }
+  .linkish.mono { font-family: var(--mono); font-size: 13px; }
+  /* a table cell that opens the drawer: reads as text, underlined on hover and focus */
+  .cellbtn { background: none; border: none; padding: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; border-radius: 0; }
+  button.cellbtn:hover:not(:disabled), button.cellbtn:focus-visible { text-decoration: underline; background: none; }
+  .data td .mono { white-space: nowrap; }
+
+  /* NIST 800-53 and KEV (CTID mappings) */
+  .map-cover { margin: 0 0 8px; }
+  details.mapnote { margin: 0 0 10px; font-size: 13px; }
+  details.mapnote summary { cursor: pointer; color: var(--muted); }
+  details.mapnote ul.refs { margin: 6px 0; padding-left: 20px; }
+  details.mapnote ul.refs li { margin: 2px 0; }
+  details.mapnote .kicker { color: var(--muted); font-size: 12px; margin: 8px 0 0; text-transform: uppercase; letter-spacing: .04em; }
+  button.tag { background: none; font: inherit; font-size: 11.5px; line-height: 1.5; cursor: pointer; }
+  button.tag:hover { background: var(--surface-2); color: var(--text); }
+  .tag.mono { font-family: var(--mono); font-size: 11px; }
+  .tag.via, .tag.nomap { border-style: dashed; }
+  .drawer .note-line { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; margin-top: 4px; }
+  .drawer .note-line .md, .drawer .note-line .kicker { flex: 1 1 100%; }
+  .drawer .muted { color: var(--muted); }
+  .drawer .small { font-size: 12px; }
+  .drawer .small-print { margin-top: 20px; font-size: 12px; color: var(--muted); }
   .toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); white-space: nowrap; }
 </style>
 </head>
@@ -300,7 +333,7 @@
         <div class="export-bar" id="exportBar" role="toolbar" aria-label="Export" hidden>
           <div class="export-buttons">
             <button class="primary" id="exportWorkpaper" aria-disabled="false"
-              title="Excel workpaper (.xlsx): executive summary, matrix, techniques, mitigations, detections, ICS assets, telemetry and analytics, with editable statuses">Export workpaper</button>
+              title="Excel workpaper (.xlsx): executive summary, matrix, techniques, mitigations, detections, ICS assets, telemetry and analytics, NIST 800-53 controls and known exploited CVEs, with editable statuses">Export workpaper</button>
             <button id="exportCsv" title="Techniques with their mitigations, detections and coverage (.csv)">CSV</button>
             <button id="exportNavigator" title="Layer for MITRE ATT&amp;CK Navigator (ATLAS Navigator for ATLAS), one JSON file per domain">Navigator</button>
           </div>
@@ -320,7 +353,7 @@
 
         <div class="tabs" role="tablist" id="tabs"></div>
         <div id="tabTools" class="tab-tools"></div>
-        <div id="tabBody"></div>
+        <div id="tabBody" role="tabpanel"></div>
       </div>
     </section>
   </div>
@@ -332,6 +365,7 @@
 
 <script src="js/attack-db.js"></script>
 <script src="js/sim-engine.js"></script>
+<script src="js/mappings-db.js"></script>
 <script src="js/workpaper.js"></script>
 <script src="js/simulator.js"></script>
 </body>

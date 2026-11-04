@@ -3,9 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ATT&amp;CK and ATLAS Data</title>
+<title>ATT&amp;CK, ATLAS and Mappings Data</title>
 <script src="js/auth.js"></script>
 <link rel="stylesheet" href="css/app.css">
+<style>
+  /* the mapping group sits under the knowledge-base cards */
+  #mappingGroup > h2 { margin-bottom: 4px; }
+  #mappingSource { margin: 0 0 12px; max-width: 80ch; }
+  #mappingSource a { color: inherit; }
+  #mappingCountsWrap { margin-top: 12px; }
+  /* long version labels: the picker shrinks with the card instead of widening the page */
+  #mappingCards dl.kv dd { min-width: 0; }
+  #mappingCards select { max-width: 100%; }
+</style>
 </head>
 <body>
 <header>
@@ -20,7 +30,7 @@
 </header>
 
 <main class="wrap">
-  <h1>MITRE ATT&amp;CK and ATLAS data</h1>
+  <h1>MITRE ATT&amp;CK, ATLAS and mapping data</h1>
   <p class="sub">
     Pulls the official ATT&amp;CK STIX 2.1 bundles from
     <a href="https://github.com/mitre-attack/attack-stix-data" target="_blank" rel="noopener">mitre-attack/attack-stix-data</a>
@@ -28,6 +38,10 @@
     <a href="https://github.com/mitre-atlas/atlas-data" target="_blank" rel="noopener">mitre-atlas/atlas-data</a>
     into a local database in this browser. The simulator reads adversaries (ATT&amp;CK groups, software and campaigns;
     ATLAS case studies, entities and software), techniques, mitigations and detection strategies from here.
+    It also pulls the Center for Threat-Informed Defense's mappings to ATT&amp;CK techniques of NIST SP 800-53 Rev 5
+    controls and of a selection of the CVEs in CISA's Known Exploited Vulnerabilities catalog, from
+    <a href="https://github.com/center-for-threat-informed-defense/mappings-explorer" target="_blank" rel="noopener">center-for-threat-informed-defense/mappings-explorer</a>,
+    which the simulator shows beside its results.
   </p>
 
   <div class="toolbar">
@@ -39,9 +53,16 @@
 
   <div id="domainCards" class="grid"></div>
 
+  <section id="mappingGroup">
+    <h2>Control and vulnerability mappings (CTID)</h2>
+    <p id="mappingSource" class="status-line"></p>
+    <div id="mappingCards" class="grid"></div>
+  </section>
+
   <section>
     <h2>What's stored</h2>
     <div class="card table-scroll"><table id="countsTable"></table></div>
+    <div id="mappingCountsWrap" class="card table-scroll"><table id="mappingCountsTable"></table></div>
   </section>
 
   <section>
@@ -72,12 +93,18 @@
   <div class="wrap">
     MITRE ATT&amp;CK® data © The MITRE Corporation, used under the ATT&amp;CK Terms of Use.
     MITRE ATLAS™ data © The MITRE Corporation, used under the Apache License 2.0.
-    Data stays in this browser's IndexedDB (<code>mitre-attack-db</code>).
+    Control and vulnerability mappings from the Center for Threat-Informed Defense's
+    <a href="https://ctid.mitre.org/mappings/" target="_blank" rel="noopener">Mappings Explorer</a>
+    © The MITRE Corporation, used under the Apache License 2.0.
+    NIST SP 800-53 is a publication of the National Institute of Standards and Technology; the Known Exploited
+    Vulnerabilities catalog is published by CISA.
+    Data stays in this browser's IndexedDB (<code>mitre-attack-db</code> and <code>threatsim-mappings</code>).
   </div>
 </footer>
 
 <script src="js/vendor/js-yaml.min.js"></script>
 <script src="js/attack-db.js"></script>
+<script src="js/mappings-db.js"></script>
 <script src="js/data-manager.js"></script>
 </body>
 </html>

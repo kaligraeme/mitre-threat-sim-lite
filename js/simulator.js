@@ -31,8 +31,51 @@
     }
   }
 
+  const FOCUSABLE = 'button, input, select, textarea, a[href], summary';
+
+  /**
+   * Where a control sits, so the control that replaces it after a re-render can take focus: by its own
+   * data-key (sort buttons, switches, matrix cells), else by its table row's data-row and its position among
+   * the row's controls, else by its position in the tab's tools; nth tells same-key matches apart (a technique
+   * in several matrix columns, one table per domain). null for anything else.
+   */
+  function placeOf(node) {
+    if (!node || node === document.body || !node.closest || !node.isConnected) return null;
+    const scope = node.closest('#drawer') ? '#drawer' : null;
+    const nth = (sel, n) => [...document.querySelectorAll(sel)].filter(x => !!x.closest('#drawer') === !!scope).indexOf(n);
+    if (node.dataset && node.dataset.key) { const sel = '[data-key="' + CSS.escape(node.dataset.key) + '"]'; return { sel, nth: nth(sel, node), at: -1, scope }; }
+    const row = node.closest('[data-row]');
+    if (row) { const sel = '[data-row="' + CSS.escape(row.dataset.row) + '"]'; return { sel, nth: nth(sel, row), at: [...row.querySelectorAll(FOCUSABLE)].indexOf(node), scope }; }
+    const tools = node.closest('#tabTools');
+    if (tools) return { sel: '#tabTools', nth: 0, at: [...tools.querySelectorAll(FOCUSABLE)].indexOf(node), scope };
+    return null;
+  }
+  /** The control now at a place from placeOf (null when it is gone). */
+  function findPlace(p) {
+    if (!p) return null;
+    const all = [...document.querySelectorAll(p.sel)].filter(x => !!x.closest('#drawer') === !!p.scope);
+    const host = all[p.nth] || all[0];
+    if (!host) return null;
+    if (p.at < 0) return host;
+    const ctl = host.querySelectorAll(FOCUSABLE);
+    return ctl[p.at] || ctl[0] || null;
+  }
+  /**
+   * Focus a control (scrolling only when it is out of view); one inside a disclosure the user had open (the
+   * re-render closed it) opens it again. Returns whether the control took focus.
+   */
+  function focusQuiet(n) {
+    if (!n) return false;
+    for (let d = n.closest('details'); d; d = d.parentElement && d.parentElement.closest('details')) if (!d.open && !n.matches('summary')) d.open = true;
+    const b = n.getBoundingClientRect();
+    n.focus({ preventScroll: b.top >= 0 && b.bottom <= innerHeight });
+    return document.activeElement === n;
+  }
+
   const fmtN = n => (n ?? 0).toLocaleString();
   const plural = (n, one, many) => fmtN(n) + ' ' + (n === 1 ? one : many);
+  /** 'A', 'A and B', 'A, B and C'. */
+  const andList = xs => xs.length < 2 ? xs.join('') : xs.slice(0, -1).join(', ') + ' and ' + xs[xs.length - 1];
   const pct = (a, b) => b ? Math.round((a / b) * 100) + '%' : '0%';
   const domainInfo = id => AttackDB.DOMAINS.find(d => d.id === id) || { id, label: id, title: id, family: 'attack' };
   const domainLabel = id => domainInfo(id).label;          // Enterprise, ICS, ATLAS
@@ -40,7 +83,9 @@
   const familyOf = id => domainInfo(id).family;            // attack | atlas
   const familyName = id => AttackDB.FAMILIES[familyOf(id)].name;   // ATT&CK | ATLAS
   const byName = (a, b) => (a.name || '').localeCompare(b.name || '');
-  const byAttackId = (a, b) => String(a.attackId).localeCompare(String(b.attackId), undefined, { numeric: true });
+  // one shared collator: localeCompare with options builds a new one per call, which is slow in big sorts
+  const idCmp = new Intl.Collator(undefined, { numeric: true }).compare;
+  const byAttackId = (a, b) => idCmp(String(a.attackId), String(b.attackId));
 
   const ENTITIES = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'", nbsp: ' ' };
   const decodeEntities = t => t.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
@@ -177,10 +222,13 @@
     ui: {
       pickFamily: 'attack', pickTab: 'groups', lastTab: {}, search: '', matchDesc: false,
       swType: '', swPlatform: '', swCategory: '', csType: '', entType: '', purpose: '', campSince: '',
-      tab: 'matrix', matrixDomain: null, colorMode: 'usage', showAll: false, filter: '', sort: {},
+      tab: 'matrix', matrixDomain: null, colorMode: 'usage', showAll: false, filter: '', sort: {}, kevExploited: false,
     },
     results: [],
     catalogs: null,
+    // CTID mappings (MappingsDB): per source id { meta, details: Map id -> text, indexes: { domain: Index },
+    // cvesByDomain: { domain: distinct capabilities in the rows } }; errors: per source id, why it could not be read
+    mappings: { sources: {}, errors: {} },
   };
 
   // Workbook export progress, reflected on the static export toolbar by syncExportUi().
@@ -194,7 +242,8 @@
       opts: { viaSoftware: state.opts.viaSoftware, viaCampaigns: state.opts.viaCampaigns, platforms: [...state.opts.platforms] },
       inPlace: { mitigations: [...state.inPlace.mitigations], detections: [...state.inPlace.detections] },
       ui: { pickFamily: state.ui.pickFamily, pickTab: state.ui.pickTab, lastTab: state.ui.lastTab, tab: state.ui.tab,
-            colorMode: state.ui.colorMode, showAll: state.ui.showAll, matrixDomain: state.ui.matrixDomain, matchDesc: state.ui.matchDesc },
+            colorMode: state.ui.colorMode, showAll: state.ui.showAll, matrixDomain: state.ui.matrixDomain, matchDesc: state.ui.matchDesc,
+            kevExploited: state.ui.kevExploited },
     };
     try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch (_) { /* storage unavailable */ }
   }
@@ -269,6 +318,56 @@
     return (state.catalogs = out);
   }
 
+  // ---------- CTID mappings (NIST SP 800-53 Rev 5, CISA KEV) ----------
+
+  const MAP = SimEngine.MAPPING_SOURCES;   // { nist: {id, domains}, kev: {id, domains} }
+  const NIST_PAGE = 'https://ctid.mitre.org/mappings/external/nist/';
+  const KEV_CATALOG = 'https://www.cisa.gov/known-exploited-vulnerabilities-catalog';
+  const KEV_ROLES = [
+    ['exploitation_technique', 'Exploitation technique', 'Exploitation'],
+    ['primary_impact', 'Primary impact', 'Primary impact'],
+    ['secondary_impact', 'Secondary impact', 'Secondary impact'],
+    ['uncategorized', 'Uncategorized', 'Uncategorized'],
+  ];
+  const roleName = type => (KEV_ROLES.find(x => x[0] === type) || [type, type || 'Mapped'])[1];
+  const mappingSource = key => state.mappings.sources[MAP[key].id] || null;
+  /** The index for a source and domain: null when the source isn't pulled (an empty index when it has no rows there). */
+  const mappingIndex = (key, domain) => { const s = mappingSource(key); return s ? s.indexes[domain] || null : null; };
+
+  /** Read the pulled mapping sources once and index them against the loaded ATT&CK models. Never throws. */
+  async function loadMappings() {
+    const failAll = msg => { for (const key of Object.keys(MAP)) state.mappings.errors[MAP[key].id] = msg; };
+    if (typeof MappingsDB === 'undefined') { failAll('the mappings module (js/mappings-db.js) did not load'); return; }
+    let metas = [];
+    try { metas = await MappingsDB.getAllMeta(); } catch (e) { console.error(e); failAll(e.message || String(e)); return; }
+    for (const key of Object.keys(MAP)) {
+      const id = MAP[key].id;
+      if (!metas.some(m => m && m.source === id)) continue;
+      try {
+        const { meta, rows, details } = await MappingsDB.loadSource(id);
+        if (!meta) continue;
+        const byDomain = new Map();
+        for (const row of Array.isArray(rows) ? rows : []) {
+          if (!row || typeof row.domain !== 'string') continue;
+          if (!byDomain.has(row.domain)) byDomain.set(row.domain, []);
+          byDomain.get(row.domain).push(row);
+        }
+        const src = { meta, details: new Map(), indexes: {}, cvesByDomain: {} };
+        for (const d of Array.isArray(details) ? details : []) if (d && typeof d.id === 'string' && typeof d.text === 'string') src.details.set(d.id, d.text);
+        for (const [domain, list] of byDomain) src.cvesByDomain[domain] = new Set(list.map(x => x.capabilityId).filter(Boolean)).size;
+        for (const domain of MAP[key].domains) {
+          if (!state.models[domain]) continue;
+          src.indexes[domain] = SimEngine.indexMappings(state.models[domain], byDomain.get(domain) || []);
+          src.indexes[domain].source = id;   // also when the source has no rows for this domain
+        }
+        state.mappings.sources[id] = src;
+      } catch (e) {
+        console.error(e);
+        state.mappings.errors[id] = e.message || String(e);
+      }
+    }
+  }
+
   // ---------- analysis ----------
 
   function analyze() {
@@ -279,6 +378,7 @@
       r.statusCounts = SimEngine.applyPosture(r, state.inPlace);
       r.mitPriority = SimEngine.prioritize(r.mitigations, state.inPlace.mitigations, r.domain, r.techniques);
       r.detPriority = SimEngine.prioritize(r.detections, state.inPlace.detections, r.domain, r.techniques);
+      SimEngine.mapExternal(r, { nist: mappingIndex('nist', r.domain), kev: mappingIndex('kev', r.domain) });
     }
     if (!state.results.some(r => r.domain === state.ui.matrixDomain)) {
       state.ui.matrixDomain = state.results.length ? state.results[0].domain : null;
@@ -657,11 +757,21 @@
     );
   }
 
+  /** Distinct controls or CVEs over all results; null (no count shown) when no result has the mapping. */
+  const mappingTotal = key => {
+    const ok = state.results.filter(r => r[key]);
+    return ok.length ? new Set(ok.flatMap(r => [...(key === 'nist' ? r.nist.controls : r.kev.cves).keys()])).size : null;
+  };
+  // Labels must not contain Matrix, Techniques, Mitigations or Detections (tests click tabs by text), and the
+  // row must stay one line at 1280px: the mapping tabs use short labels with the full name as their title
+  // ("NIST" is read out but not shown). A label is text or a function returning nodes (rebuilt each render).
   const TABS = [
     { key: 'matrix', label: 'Matrix' },
     { key: 'techniques', label: 'Techniques', count: r => r.techniques.size },
     { key: 'mitigations', label: 'Mitigations', count: r => r.mitigations.size },
     { key: 'detections', label: 'Detections', count: r => r.detections.size },
+    { key: 'nist', label: () => [el('span', { class: 'vh', text: 'NIST ' }), '800-53'], title: 'NIST SP 800-53 Rev 5 controls mapped to the profile techniques (CTID Mappings Explorer)', total: () => mappingTotal('nist') },
+    { key: 'kev', label: 'KEV', title: 'CISA Known Exploited Vulnerabilities (CVEs) mapped to the profile techniques (CTID Mappings Explorer)', total: () => mappingTotal('kev') },
     { key: 'telemetry', label: 'Telemetry', count: r => r.dataComponents.size },
     { key: 'assets', label: 'ICS assets', count: r => r.assets.size },
   ];
@@ -669,28 +779,66 @@
   function renderTabs() {
     const tabs = TABS.filter(t => t.key !== 'assets' || state.results.some(r => r.assets.size));
     if (!tabs.some(t => t.key === state.ui.tab)) state.ui.tab = 'matrix';
-    $('#tabs').replaceChildren(...tabs.map(t => {
-      const n = t.count ? state.results.reduce((s, r) => s + t.count(r), 0) : null;
+    // the row is rebuilt below: keep keyboard focus on the tab that was used
+    const active = document.activeElement;
+    const focused = active && active.closest && active.closest('#tabs') ? active.dataset.tab : null;
+    const select = key => { state.ui.tab = key; state.ui.filter = ''; persist(); renderTabs(); renderTab(); };
+    const host = $('#tabs');
+    host.replaceChildren(...tabs.map((t, i) => {
+      const n = t.total ? t.total() : t.count ? state.results.reduce((s, r) => s + t.count(r), 0) : null;
+      const on = state.ui.tab === t.key;
       return el('button', {
-        role: 'tab', 'aria-selected': String(state.ui.tab === t.key),
-        on: { click: () => { state.ui.tab = t.key; state.ui.filter = ''; persist(); renderTabs(); renderTab(); } },
-      }, t.label, n != null ? el('span', { class: 'count', text: ' ' + fmtN(n) }) : null);
+        role: 'tab', 'aria-selected': String(on), tabindex: on ? '0' : '-1', title: t.title || null, data: { tab: t.key },
+        'aria-controls': 'tabBody', id: 'tab-' + t.key,
+        on: {
+          click: () => select(t.key),
+          // arrow keys move between tabs (the selected tab is the only one in the Tab order)
+          keydown: e => {
+            const j = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+            if (j == null) return;
+            e.preventDefault();
+            select(tabs[(j + tabs.length) % tabs.length].key);
+            const b = host.querySelector('[data-tab="' + state.ui.tab + '"]');
+            if (b) b.focus();
+          },
+        },
+      }, typeof t.label === 'function' ? t.label() : t.label, n != null ? el('span', { class: 'count', text: ' ' + fmtN(n) }) : null);
     }));
+    if (focused) { const b = host.querySelector('[data-tab="' + focused + '"]'); if (b) b.focus(); }
+    // a row too wide for its column scrolls sideways (wide screens only): keep the selected tab in view
+    const sel = host.querySelector('[aria-selected="true"]');
+    if (sel && host.scrollWidth > host.clientWidth + 1) {
+      const hr = host.getBoundingClientRect(), br = sel.getBoundingClientRect();
+      if (br.left < hr.left) host.scrollLeft += br.left - hr.left;
+      else if (br.right > hr.right) host.scrollLeft += br.right - hr.right;
+    }
+    $('#tabBody').setAttribute('aria-labelledby', 'tab-' + state.ui.tab);
   }
 
   function renderTab() {
     hideTip();
     const tools = $('#tabTools');
     const body = $('#tabBody');
+    // a sort button, an in-place switch or a tool rebuilds the tab: put focus back on the control that replaced it
+    const active = document.activeElement;
+    const place = active && (tools.contains(active) || body.contains(active)) ? placeOf(active) : null;
     tools.replaceChildren();
     body.replaceChildren();
-    ({ matrix: renderMatrix, techniques: renderTechniques, mitigations: renderMitigations,
-       detections: renderDetections, telemetry: renderTelemetry, assets: renderAssets })[state.ui.tab](tools, body);
+    ({ matrix: renderMatrix, techniques: renderTechniques, mitigations: renderMitigations, detections: renderDetections,
+       nist: renderNist, kev: renderKev, telemetry: renderTelemetry, assets: renderAssets })[state.ui.tab](tools, body);
+    if (place && (!document.activeElement || document.activeElement === document.body)) focusQuiet(findPlace(place));
   }
 
-  function filterBox(placeholder, rerender) {
+  function filterBox(placeholder, rerender, delay = 0) {
     const i = el('input', { type: 'search', placeholder, value: state.ui.filter });
-    i.addEventListener('input', () => { state.ui.filter = i.value; rerender(); });
+    const tab = state.ui.tab;
+    let timer = null;
+    i.addEventListener('input', () => {
+      state.ui.filter = i.value;
+      if (!delay) { rerender(); return; }
+      clearTimeout(timer);
+      timer = setTimeout(() => { if (state.ui.tab === tab && i.isConnected) rerender(); }, delay);
+    });
     return i;
   }
 
@@ -740,7 +888,7 @@
         cls.push('used');
         cls.push(mode === 'usage' ? 'u' + usageStep(used.roots.size, max) : 's-' + used.status);
       }
-      return el('button', { class: cls.join(' '), data: { tech: tech.id } },
+      return el('button', { class: cls.join(' '), data: { tech: tech.id, key: 'cell|' + r.domain + '|' + tech.id } },
         used && mode === 'coverage' ? el('span', { class: 'st', 'aria-label': STATUS[used.status].label, text: STATUS[used.status].icon }) : null,
         tech.name,
         el('span', { class: 'id', text: tech.attackId }),
@@ -785,6 +933,7 @@
       el('b', { text: tech.attackId + ' ' + tech.name }),
       t ? el('div', { class: 'row', text: 'Used by ' + t.roots.size + ': ' + rootNames(t) }) : el('div', { class: 'row', text: 'Not used by this profile' }),
       el('div', { class: 'row', text: mitN + ' mitigations · ' + detN + ' detection strategies' }),
+      mappingTipRow(r, techId),
       t ? el('div', { class: 'row', text: 'Coverage: ' + STATUS[t.status].label }) : null,
     );
     tip.hidden = false;
@@ -798,11 +947,26 @@
   }
   function hideTip() { $('#tip').hidden = true; }
 
+  /** "NIST 800-53: 12 controls · KEV: 3 CVEs" for a matrix cell, from the indexes (used or not). */
+  function mappingTipRow(r, techId) {
+    const st = r.mappingStatus || {};
+    const parts = [];
+    if (st.nist === 'ok') parts.push('NIST 800-53: ' + plural(SimEngine.controlsFor(r.nist.index, r.model, techId).length, 'control', 'controls'));
+    if (st.kev === 'ok') parts.push('KEV: ' + plural(SimEngine.cvesFor(r.kev.index, techId).length, 'CVE', 'CVEs'));
+    return parts.length ? el('div', { class: 'row', text: parts.join(' · ') }) : null;
+  }
+
   // ---------- tables ----------
 
+  /** A row's key for focus restoring: the table, the result's domain and the row's object (a control, CVE, technique …). */
+  const defaultRowKey = row => (row.r ? row.r.domain : '') + '|' + (row.id != null ? row.id : row.t ? row.t.tech.id : '');
+
   /**
-   * cols: [{key, label, num, sort:(row)=>v, render:(row)=>node|string}]
-   * opts: {id, defaultSort:{key,dir}, onRow:(row)=>void, rowClass:(row)=>string}
+   * cols: [{key, label, title, num, sort:(row)=>v, render:(row)=>node|string}]
+   * opts: {id, defaultSort:{key,dir}, onRow:(row)=>void, rowClass:(row)=>string, rowKey:(row)=>string,
+   *        empty: text for a table with no rows (default: "Nothing matches." with a filter typed, else "None in this profile.")}
+   * Sortable headers hold a button (keyboard: Tab to it, Enter or Space sorts); each row carries data-row so the
+   * control that had focus can be found again after a re-render (see placeOf).
    */
   function table(rows, cols, opts) {
     const s = state.ui.sort[opts.id] || opts.defaultSort;
@@ -814,26 +978,32 @@
         if (x === y) return 0;
         if (x == null) return 1;
         if (y == null) return -1;
-        return (typeof x === 'string' ? x.localeCompare(y, undefined, { numeric: true }) : x - y) * dir;
+        return (typeof x === 'string' ? idCmp(x, y) : x - y) * dir;
       });
     }
     const head = el('tr', {}, ...cols.map(c => {
       const sorted = col && c.key === col.key;
+      // the click handler sits on the cell (a click anywhere in it sorts); the button gives it a Tab stop and Enter/Space
       return el('th', {
-        class: (c.num ? 'num ' : '') + (c.sort ? 'sortable' : ''),
+        class: (c.num ? 'num ' : '') + (c.sort ? 'sortable' : ''), title: c.title || null,
         'aria-sort': sorted ? (s.dir === 'asc' ? 'ascending' : 'descending') : null,
         on: c.sort ? { click: () => {
           const cur = state.ui.sort[opts.id] || opts.defaultSort;
           state.ui.sort[opts.id] = { key: c.key, dir: cur.key === c.key && cur.dir === 'desc' ? 'asc' : (cur.key === c.key ? 'desc' : (c.num ? 'desc' : 'asc')) };
           renderTab();
         } } : null,
-      }, c.label);
+      }, c.sort ? el('button', { type: 'button', class: 'sortbtn', data: { key: 'sort|' + opts.id + '|' + c.key } }, c.label) : c.label);
     }));
+    const rowKey = opts.rowKey || defaultRowKey;
     const body = el('tbody', {}, ...rows.map(row => el('tr', {
       class: ((opts.onRow ? 'click ' : '') + (opts.rowClass ? opts.rowClass(row) : '')).trim() || null,
+      data: { row: opts.id + '|' + rowKey(row) },
       on: opts.onRow ? { click: e => { if (!e.target.closest('input,a,button,label')) opts.onRow(row); } } : null,
     }, ...cols.map(c => el('td', { class: c.num ? 'num' : null }, c.render(row))))));
-    if (!rows.length) body.append(el('tr', {}, el('td', { colspan: cols.length, class: 'empty', text: 'Nothing matches.' })));
+    if (!rows.length) {
+      const empty = opts.empty || (state.ui.filter.trim() ? 'Nothing matches.' : 'None in this profile.');
+      body.append(el('tr', {}, el('td', { colspan: cols.length, class: 'empty', text: empty })));
+    }
     return el('div', { class: 'card table-scroll', style: 'padding:4px 8px' }, el('table', { class: 'data' }, el('thead', {}, head), body));
   }
 
@@ -1028,14 +1198,262 @@
     }
   }
 
+  // ---------- NIST 800-53 and KEV tabs ----------
+
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  /** '2025-07-28' -> '28 Jul 2025' (as the Data page writes catalog dates); anything else as given. */
+  const fmtDate = iso => { const d = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || ''); return d && MONTHS[+d[2] - 1] ? +d[3] + ' ' + MONTHS[+d[2] - 1] + ' ' + d[1] : (iso || ''); };
+  const dataPageLink = text => el('a', { href: 'index.html', text });
+  /** "16 IDs carried forward to their replacements, 1 not current" for one index. */
+  const changedIds = ix => [ix.replaced.length ? plural(ix.replaced.length, 'ID', 'IDs') + ' carried forward to ' + (ix.replaced.length === 1 ? 'its replacement' : 'their replacements') : null,
+    ix.unresolved.length ? fmtN(ix.unresolved.length) + ' not current' : null].filter(Boolean).join(', ');
+  /** Domains (with their index) for which a result of this profile shows the mapping. */
+  const shownIndexes = key => { const src = mappingSource(key); return src ? Object.entries(src.indexes).filter(([d, ix]) => ix.rowCount && state.results.some(r => r.domain === d && r[key])) : []; };
+  /** Why a source's rows could not be read on this page load (null when they could, or were never pulled). */
+  const mappingError = key => state.mappings.errors[MAP[key].id] || null;
+  const sourceName = key => (key === 'nist' ? 'NIST 800-53' : 'KEV');
+  const withStop = t => (/[.!?]$/.test(t) ? t : t + '.');
+
+  /** Provenance line for a mapping tab: dataset, ATT&CK version it targets, how it was matched to the stored release(s). */
+  function mappingProvenance(key) {
+    const shown = shownIndexes(key);
+    if (!shown.length) return null;
+    const m = mappingSource(key).meta;
+    const parts = shown.map(([d, ix]) => { const changes = changedIds(ix); return domainTitle(d) + ' v' + ix.attackVersion + (changes ? ' (' + changes + ')' : ''); });
+    const what = key === 'nist' ? 'NIST SP 800-53 Rev 5' : 'the CISA KEV catalog' + (m.frameworkVersion ? ' of ' + fmtDate(m.frameworkVersion) : '');
+    return 'CTID mapping of ' + what + ' to ATT&CK ' + (m.attackVersion || '?') + ', matched by ID to ' + parts.join(' and ') + '.';
+  }
+
+  /** "The NIST 800-53 mappings are not pulled", or why they could not be read (technique drawer). */
+  function notPulledHint(key) {
+    const err = mappingError(key);
+    if (err) return el('p', { class: 'hint', text: 'The ' + sourceName(key) + ' mappings could not be read (' + err + '). Reload the page to try again.' });
+    return el('p', { class: 'hint' }, 'The ' + sourceName(key) + ' mappings are not pulled. ', dataPageLink('Pull them on the Data page'), '.');
+  }
+
+  /** Why a result has no rows on a mapping tab, as a hint (null when it has the mapping). */
+  function mappingNote(key, r) {
+    const st = r.mappingStatus ? r.mappingStatus[key] : 'not-pulled';
+    const name = key === 'nist' ? 'NIST SP 800-53' : 'KEV';
+    if (st === 'ok') return null;
+    if (st === 'not-this-domain') {
+      if (familyOf(r.domain) === 'atlas' || r.domain === 'ics-attack') return el('p', { class: 'hint', text: 'No NIST 800-53 or KEV mappings exist for ' + domainTitle(r.domain) + '.' });
+      return el('p', { class: 'hint', text: 'CTID maps NIST 800-53 to Enterprise ATT&CK only; the known exploited CVEs of ' + domainTitle(r.domain) + ' are on the KEV tab.' });
+    }
+    if (st === 'no-attack-data') return el('p', { class: 'hint', text: 'The pulled ' + name + ' mappings (' + mappingSource(key).meta.label + ') have no ' + domainTitle(r.domain) + ' entries.' });
+    // reading failed: pulling again is not the remedy, so don't send the user to the Data page
+    const err = mappingError(key);
+    if (err) return el('p', { class: 'hint', text: 'The ' + name + ' mappings could not be read (' + err + '). Reload the page to try again.' });
+    return el('p', { class: 'hint' }, 'The ' + name + ' mappings are not pulled yet. ', dataPageLink('Pull them on the Data page'), ' to see them here.');
+  }
+
+  /** The other loaded ATT&CK domain where a technique ID is current ('Mobile ATT&CK' for T1521.003), or null. */
+  function currentElsewhere(attackId, domain) {
+    for (const [d, m] of Object.entries(state.models)) {
+      if (d === domain || !m || familyOf(d) !== 'attack') continue;
+      if ((m.byKind.technique || []).some(t => t.attackId === attackId)) return domainTitle(d);
+    }
+    return null;
+  }
+
+  /**
+   * IDs of CTID's that changed in the stored ATT&CK release: carried forward, or not current. The list is the
+   * mapping file's, for the domains this profile shows the mapping for; the IDs whose carried-forward mappings
+   * reach this profile (r.nist / r.kev .carriedFrom) come first, under their own heading.
+   */
+  function changedIdsBlock(key) {
+    const src = mappingSource(key);
+    if (!src) return null;
+    const reaching = [], others = [];
+    for (const [d, ix] of shownIndexes(key)) {
+      const where = domainTitle(d) + ' v' + ix.attackVersion;
+      const r = resultFor(d);
+      const reach = (r && r[key] && r[key].carriedFrom) || new Set();
+      const keyed = (b, id) => { b.dataset.key = 'changed|' + key + '|' + d + '|' + id; return b; };
+      for (const x of ix.replaced) (reach.has(x.from) ? reaching : others).push(el('li', {}, el('span', { class: 'mono', text: x.from }), ' ' + x.fromName + ': revoked; its replacement in ' + where + ' is ',
+        keyed(techButton(d, state.models[d].byId.get(x.toId)), x.from), ' (' + plural(x.rows, 'mapping', 'mappings') + ' carried forward)'));
+      for (const x of ix.unresolved) {
+        const other = x.reason.startsWith('not in ') ? currentElsewhere(x.techniqueId, d) : null;
+        others.push(el('li', {}, el('span', { class: 'mono', text: x.techniqueId }), ' ' + x.techniqueName + ': ' + x.reason
+          + ' (' + (other ? 'a ' + other + ' technique; ' : '') + plural(x.rows, 'mapping', 'mappings') + ' not shown)'));
+      }
+    }
+    const n = reaching.length + others.length;
+    if (!n) return null;
+    const reachText = reaching.length ? fmtN(reaching.length) + (reaching.length === 1 ? ' reaches' : ' reach') : 'none reaches';
+    return el('details', { class: 'mapnote' },
+      el('summary', { text: 'Technique IDs from ATT&CK ' + src.meta.attackVersion + ' that changed (' + fmtN(n) + ' in CTID\'s mapping; ' + reachText + ' this profile)' }),
+      reaching.length ? [el('div', { class: 'kicker', text: 'Reaching this profile' }), el('ul', { class: 'refs' }, ...reaching)] : null,
+      others.length ? [reaching.length ? el('div', { class: 'kicker', text: 'Not reaching this profile' }) : null, el('ul', { class: 'refs' }, ...others)] : null);
+  }
+
+  /** A short tag list of technique IDs (first n, then +N with the rest in the title). */
+  function techTags(r, techIds, n = 4) {
+    const techs = [...techIds].map(id => r.model.byId.get(id)).filter(Boolean).sort(byAttackId);
+    return el('div', { class: 'tags' }, techs.slice(0, n).map(t => el('span', { class: 'tag mono', title: t.name, text: t.attackId })),
+      techs.length > n ? el('span', { class: 'tag', title: techs.slice(n).map(t => t.attackId + ' ' + t.name).join(', '), text: '+' + (techs.length - n) }) : null);
+  }
+
+  /** Top related ATT&CK mitigations by overlap, as tags. */
+  function mitigationTags(r, mits, n = 3) {
+    const list = [...mits].map(([id, k]) => [r.model.byId.get(id), k]).filter(([m]) => m);
+    return el('div', { class: 'tags' }, list.slice(0, n).map(([m, k]) => el('span', { class: 'tag', title: m.name + ': shares ' + plural(k, 'profile technique', 'profile techniques'), text: m.attackId + ' · ' + k })),
+      list.length > n ? el('span', { class: 'tag', title: list.slice(n).map(([m, k]) => m.attackId + ' ' + m.name + ' (' + k + ')').join(', '), text: '+' + (list.length - n) }) : null);
+  }
+  const RELATED_NOTE = 'Worked out by ThreatSim from the profile techniques they share; not part of CTID\'s mapping.';
+
+  /** Name cell that opens the drawer, so the row can be reached by keyboard. */
+  const drawerButton = (text, open) => el('button', { class: 'cellbtn', text, on: { click: open } });
+
+  function renderNist(tools, body) {
+    // the box filters the control table only: offer it when some result has a control to list
+    if (state.results.some(r => r.nist && r.nist.controls.size)) tools.append(filterBox('Filter controls or technique IDs', () => renderTabBody(renderNist), 150));
+    const prov = mappingProvenance('nist');
+    if (prov) tools.append(el('span', { class: 'hint', text: prov }));
+    perDomain(body, r => {
+      const note = mappingNote('nist', r);
+      if (note) { body.append(note); return; }
+      const n = r.nist;
+      const total = r.techniques.size;
+      const none = [...n.uncovered].map(id => r.model.byId.get(id)).sort(byAttackId);
+      // techniques that count only through ThreatSim's via-parent rule: CTID maps no control to them directly
+      const vp = n.viaParentOnly ? n.viaParentOnly.size : 0, cov = n.covered.size;
+      const viaText = !vp ? '' : ' ' + (vp === cov ? (cov === 1 ? 'That technique counts' : 'All ' + fmtN(cov) + ' count') : 'Of the ' + fmtN(cov) + ' with a control, ' + fmtN(vp) + (vp === 1 ? ' counts' : ' count'))
+        + ' only because ThreatSim gives a sub-technique the controls CTID mapped to its parent; CTID maps none to ' + (vp === 1 ? 'it' : 'them') + ' directly.';
+      // why the others have none: CTID judged them not mappable, or its mapping has no row for them at all
+      // (some added to ATT&CK after the release CTID mapped), as the workbook says
+      const version = ctidAttackVersion('nist');
+      const judged = none.filter(t => n.nonMappable.has(t.id)).length, absent = none.length - judged;
+      const late = none.filter(t => !n.nonMappable.has(t.id) && SimEngine.addedAfterRelease(t, version)).length;
+      const why = !none.length ? '' : judged === none.length ? ': CTID judged ' + (judged === 1 ? 'it' : 'them all') + ' not mappable to 800-53'
+        : ': ' + (judged ? 'CTID judged ' + fmtN(judged) + ' not mappable to 800-53, and ' + fmtN(absent) + (absent === 1 ? ' is not' : ' are not')
+          : absent === 1 ? 'it is not' : 'none of them is') + ' in CTID\'s mapping at all'
+          + (late ? ' (' + (late === absent && absent > 1 ? 'all' : fmtN(late)) + ' added to ATT&CK after ' + version + ', the release CTID mapped)' : '');
+      body.append(el('p', { class: 'hint map-cover', data: { covered: cov, total, none: none.length, nonMappable: n.nonMappable.size, absent, late, viaParent: vp } },
+        fmtN(cov) + ' of ' + plural(total, 'profile technique has', 'profile techniques have') + ' at least one control'
+        + (none.length ? '; ' + fmtN(none.length) + ' ' + (none.length === 1 ? 'has' : 'have') + ' none' : '') + why + '.' + viaText));
+      if (none.length) {
+        body.append(el('details', { class: 'mapnote' }, el('summary', { text: 'Profile techniques with no 800-53 control (' + none.length + ')' }),
+          el('div', { class: 'tags', style: 'margin-top:6px' }, none.map(t => el('button', {
+            class: 'tag tagbtn mono' + (n.nonMappable.has(t.id) ? ' nomap' : ''), text: t.attackId, data: { key: 'nocontrol|' + r.domain + '|' + t.id },
+            title: t.name + (n.nonMappable.has(t.id) ? ' (CTID: not mappable' + (n.index.nonMappable.get(t.id) ? ': ' + n.index.nonMappable.get(t.id) : '') + ')' : ''),
+            on: { click: () => openDrawer(() => techniqueDrawer(r.domain, t.id)) },
+          })))));
+      }
+      const rows = [...n.controls].map(([id, c]) => ({ r, id, c, gaps: [...c.techniques].filter(t => r.techniques.get(t).status === 'gap').length }))
+        .filter(x => matches(x.c.obj, [x.c.obj.family, x.c.obj.familyName, ...[...x.c.techniques].map(t => r.model.byId.get(t).attackId)].join(' ')));
+      // no control at all for this profile: the sentence above says so (an empty table would read as "filtered out")
+      if (!n.controls.size) return;
+      const open = x => openDrawer(() => controlDrawer(x.r.domain, x.id));
+      body.append(table(rows, [
+        { key: 'id', label: 'Control', sort: x => x.id, render: x => el('button', { class: 'linkish mono', text: x.id, title: 'Open ' + x.id, on: { click: () => open(x) } }) },
+        { key: 'name', label: 'Name', sort: x => x.c.obj.name, render: x => x.c.obj.name },
+        { key: 'family', label: 'Family', sort: x => x.c.obj.familyName, render: x => el('span', { title: x.c.obj.family, text: x.c.obj.familyName }) },
+        { key: 'tech', label: 'Profile techniques', num: true, sort: x => x.c.techniques.size, render: x => el('div', { title: x.c.viaParent.size ? x.c.viaParent.size + ' via the parent technique' : null }, meter(x.c.techniques.size, total)) },
+        { key: 'gaps', label: 'Gaps it addresses', num: true, sort: x => x.gaps, render: x => String(x.gaps) },
+        { key: 'mit', label: 'Related ATT&CK mitigations', title: 'ATT&CK mitigations of this profile that address the same techniques, with how many they share. ' + RELATED_NOTE,
+          render: x => mitigationTags(r, x.c.mitigations) },
+        { key: 'ids', label: 'Technique IDs', render: x => techTags(r, x.c.techniques) },
+      ], { id: 'nist', defaultSort: { key: 'tech', dir: 'desc' }, onRow: open }));
+    });
+    append(body, [changedIdsBlock('nist')]);
+  }
+
+  /** A CVE is exploited through a profile technique when one of its profile techniques has the exploitation role. */
+  const exploitedInProfile = c => [...c.roles.values()].some(set => set.has('exploitation_technique'));
+  /** The techniques CTID maps a CVE's exploitation to (current records, used by the profile or not). */
+  const exploitationTechs = (ix, model, cveId) => {
+    const cap = ix && ix.capabilities.get(cveId);
+    return cap ? [...new Set(cap.mappings.filter(x => x.type === 'exploitation_technique').map(x => x.tech))].map(id => model.byId.get(id)).filter(Boolean) : [];
+  };
+  const KEV_CAVEAT = 'CTID links CVEs to ATT&CK techniques, not to threat groups: a CVE is listed because this profile uses one of its techniques, not because these threats are known to exploit it.';
+
+  /** "415 of the 419 CVEs CTID mapped to Enterprise ATT&CK use a technique in this profile, through ..." */
+  function kevCoverText(r, multi) {
+    const all = r.kev.index.capabilities.size;
+    const n = r.kev.cves.size, k = r.kev.covered.size, total = r.techniques.size;
+    const exploited = [...r.kev.cves.values()].filter(exploitedInProfile).length;
+    const lead = (multi ? domainLabel(r.domain) + ': ' : '');
+    const mapped = plural(all, 'CVE', 'CVEs') + ' CTID mapped to ' + domainTitle(r.domain);
+    if (!n) return lead + 'None of the ' + mapped + ' uses a technique in this profile.';
+    return lead + fmtN(n) + ' of the ' + mapped + (n === 1 ? ' uses' : ' use') + ' a technique in this profile, through ' + (total === 1 ? 'the profile\'s only technique' : fmtN(k) + ' of the profile\'s ' + fmtN(total) + ' techniques')
+      + (n === 1 ? (exploited ? ', including its exploitation technique.' : ', not its exploitation technique.')
+        : '; ' + fmtN(exploited) + ' of them through an exploitation technique the profile uses.');
+  }
+
+  function renderKev(tools, body) {
+    const ok = state.results.filter(r => r.kev);
+    // CVEs for this profile at all (a profile none of whose techniques has one gets the sentence, not an empty table,
+    // and no filter box or switch, as there is nothing for them to act on)
+    const any = ok.some(r => r.kev.cves.size);
+    if (any) {
+      tools.append(filterBox('Filter CVEs or technique IDs', () => renderTabBody(renderKev), 150));
+      const only = el('input', { type: 'checkbox', checked: !!state.ui.kevExploited });
+      only.addEventListener('change', () => { state.ui.kevExploited = only.checked; persist(); renderTabBody(renderKev); });
+      tools.append(el('label', { class: 'toggle', title: 'Leave out the CVEs listed only for their impact techniques' }, only, 'Only CVEs exploited through a profile technique'));
+    }
+    const prov = mappingProvenance('kev');
+    if (prov) tools.append(el('span', { class: 'hint', text: prov }));
+    // Mobile CVEs need Mobile ATT&CK pulled and switched on
+    const src = mappingSource('kev');
+    const mobileCves = src ? src.cvesByDomain['mobile-attack'] || 0 : 0;
+    const mobileNote = !mobileCves || !ok.length || state.results.some(r => r.domain === 'mobile-attack') ? null
+      : !state.models['mobile-attack'] ? plural(mobileCves, 'Mobile CVE shows', 'Mobile CVEs show') + ' only when Mobile ATT&CK is pulled (Data page) and switched on.'
+        : !state.domains.has('mobile-attack') ? plural(mobileCves, 'Mobile CVE shows', 'Mobile CVEs show') + ' only when Mobile ATT&CK is switched on (Domains).'
+          : 'None of the selected threats appear in Mobile ATT&CK, so its ' + plural(mobileCves, 'CVE', 'CVEs') + ' are not shown.';
+    for (const r of ok) {
+      body.append(el('p', { class: 'hint map-cover', data: { domain: r.domain, cves: r.kev.cves.size, all: r.kev.index.capabilities.size, techniques: r.kev.covered.size,
+        total: r.techniques.size, exploited: [...r.kev.cves.values()].filter(exploitedInProfile).length }, text: kevCoverText(r, ok.length > 1) }));
+    }
+    if (any) body.append(el('p', { class: 'hint' }, KEV_CAVEAT));
+    if (mobileNote) body.append(el('p', { class: 'hint', text: mobileNote }));
+    // results without the mapping say why above the table (not below a few hundred rows)
+    for (const r of state.results) { const note = mappingNote('kev', r); if (note) body.append(note); }
+    const rows = [];
+    for (const r of ok) for (const [id, c] of r.kev.cves) {
+      if (state.ui.kevExploited && !exploitedInProfile(c)) continue;
+      const ids = [...c.techniques].map(t => r.model.byId.get(t).attackId).join(' ');
+      if (matches(c.obj, c.obj.typeName + ' ' + ids)) rows.push({ r, id, c, exploited: exploitedInProfile(c) });
+    }
+    if (any) {
+      const multi = new Set(ok.filter(r => r.kev.cves.size).map(r => r.domain)).size > 1;
+      const byRole = (x, type) => [...x.c.roles].filter(([, set]) => set.has(type)).map(([t]) => t);
+      const open = x => openDrawer(() => cveDrawer(x.r.domain, x.id));
+      // the exploitation column says so when the CVE's exploitation technique is not one the profile uses
+      const exploitationCell = x => {
+        const ids = byRole(x, 'exploitation_technique');
+        if (ids.length) return techTags(x.r, ids, 3);
+        const techs = exploitationTechs(x.r.kev.index, x.r.model, x.id);
+        return el('span', { class: 'small muted', text: 'not in profile',
+          title: techs.length ? 'CTID maps its exploitation to ' + techs.map(t => t.attackId + ' ' + t.name).join(', ') + ', which this profile does not use' : 'CTID maps no exploitation technique for this CVE' });
+      };
+      body.append(table(rows, [
+        multi && { key: 'domain', label: 'Domain', sort: x => domainLabel(x.r.domain), render: x => domainLabel(x.r.domain) },
+        { key: 'id', label: 'CVE', sort: x => x.id, render: x => idLink(x.c.obj) },
+        { key: 'name', label: 'Vulnerability', sort: x => x.c.obj.name, render: x => drawerButton(x.c.obj.name, () => open(x)) },
+        { key: 'type', label: 'Type', sort: x => x.c.obj.typeName, render: x => x.c.obj.typeName },
+        // sorted: CVEs exploited through a profile technique first, then by profile techniques
+        { key: 'exploitation_technique', label: 'Exploitation', title: 'The technique the CVE is exploited through, when the profile uses it (sorts CVEs exploited through a profile technique first)',
+          sort: x => (x.exploited ? 100000 : 0) + x.c.techniques.size, render: exploitationCell },
+        ...KEV_ROLES.slice(1, 3).map(([type, , short]) => ({ key: type, label: short, render: x => techTags(x.r, byRole(x, type), 3) })),
+        { key: 'tech', label: 'Profile techniques', num: true, sort: x => x.c.techniques.size, render: x => String(x.c.techniques.size) },
+      ].filter(Boolean), { id: 'kev', defaultSort: { key: 'exploitation_technique', dir: 'desc' }, onRow: open,
+        // the switch, not a typed filter, can be what leaves the table empty
+        empty: !rows.length && !state.ui.filter.trim() && state.ui.kevExploited
+          ? 'None of these CVEs is exploited through a technique this profile uses. Switch off "Only CVEs exploited through a profile technique" to list them all.' : null }));
+    }
+    append(body, [changedIdsBlock('kev')]);
+  }
+
   // ---------- drawer ----------
 
   let drawerBuilder = null;
   let drawerReturnFocus = null;
+  let drawerReturnPlace = null;   // where the opener was, for when a re-render replaced it (see placeOf)
 
   function openDrawer(builder) {
     hideTip();
-    if (!drawerBuilder) drawerReturnFocus = document.activeElement;
+    if (!drawerBuilder) { drawerReturnFocus = document.activeElement; drawerReturnPlace = placeOf(drawerReturnFocus); }
     drawerBuilder = builder;
     const d = $('#drawer');
     fillDrawer(d, builder);
@@ -1054,30 +1472,50 @@
     if (!drawerBuilder) return;
     const d = $('#drawer');
     const top = d.scrollTop;
+    // the builder rebuilds every node: keep the disclosures the user opened and the control that had focus
+    // (a switch by its data-key, anything else by its position among the drawer's controls)
+    const open = [...d.querySelectorAll('details')].map(x => x.open);
+    const active = d.contains(document.activeElement) ? document.activeElement : null;
+    const key = active && active.dataset.key;
+    const sameKey = root => (key ? [...root.querySelectorAll('[data-key]')].filter(x => x.dataset.key === key) : []);
+    const keyAt = key ? sameKey(d).indexOf(active) : -1;
+    const at = active ? [...d.querySelectorAll(FOCUSABLE)].indexOf(active) : -1;
     fillDrawer(d, drawerBuilder);
+    const details = d.querySelectorAll('details');
+    if (details.length === open.length) details.forEach((x, i) => { x.open = open[i]; });
     d.scrollTop = top;
+    const target = (key && sameKey(d)[keyAt]) || (at >= 0 && d.querySelectorAll(FOCUSABLE)[at]) || null;
+    if (target) target.focus({ preventScroll: true });
   }
 
   function closeDrawer() {
     $('#drawer').hidden = true;
     $('#scrim').hidden = true;
     drawerBuilder = null;
-    if (drawerReturnFocus && drawerReturnFocus.isConnected) drawerReturnFocus.focus();
+    const opener = drawerReturnFocus, place = drawerReturnPlace;
+    drawerReturnFocus = drawerReturnPlace = null;
+    if (!opener || opener === document.body) return;
+    if (opener.isConnected) { opener.focus(); return; }
+    // an In place switch in the drawer re-rendered the tab and replaced the opener: focus the control that
+    // took its place (same row, same position), else the selected tab, so focus never drops to the page
+    if (!focusQuiet(findPlace(place))) focusQuiet($('#tabs [aria-selected="true"]'));
   }
 
   const resultFor = domain => state.results.find(r => r.domain === domain);
 
   function drawerHead(kicker, obj, extra) {
+    // NIST controls have no verified per-control page (the drawer links CTID's NIST page); CVEs link NVD
+    const site = obj.kind === 'kev-cve' ? 'nvd.nist.gov' : obj.kind === 'nist-control' ? null : AttackDB.FAMILIES[familyOf(obj.domain)].site;
     return [
-      el('div', { class: 'kicker' }, kicker, ' · ', obj.url ? el('a', { href: obj.url, target: '_blank', rel: 'noopener',
-        text: obj.attackId + ' on ' + AttackDB.FAMILIES[familyOf(obj.domain)].site }) : obj.attackId),
+      el('div', { class: 'kicker' }, kicker, ' · ', obj.url && site ? el('a', { href: obj.url, target: '_blank', rel: 'noopener',
+        text: obj.attackId + ' on ' + site }) : obj.kind === 'nist-control' ? el('span', { class: 'mono', text: obj.attackId }) : obj.attackId),
       el('h2', { id: 'drawerTitle', text: obj.name }),
       extra || null,
     ];
   }
 
   function postureToggle(setKey, domain, id, label) {
-    const cb = el('input', { type: 'checkbox', checked: state.inPlace[setKey].has(domain + '|' + id) });
+    const cb = el('input', { type: 'checkbox', checked: state.inPlace[setKey].has(domain + '|' + id), data: { key: setKey + '|' + domain + '|' + id } });
     cb.addEventListener('change', () => { toggleInPlace(setKey, domain, id, cb.checked); refreshDrawer(); });
     return el('label', { class: 'toggle' }, cb, label);
   }
@@ -1174,6 +1612,8 @@
           analyticsBlock(model, shown, all.length - shown.length));
       })));
 
+    out.push(...mappingSections(domain, techId));
+
     const assets = model.from(techId, 'targets', 'asset');
     if (assets.length) {
       out.push(el('section', {}, el('h3', { text: 'Targeted assets (' + assets.length + ')' }),
@@ -1182,10 +1622,212 @@
     return out;
   }
 
+  /** note(tech) returns markdown text, or a node to show as is. */
   function profileTechniqueList(domain, techIds, note) {
     const model = state.models[domain];
     const techs = [...techIds].map(id => model.byId.get(id)).sort(byAttackId);
-    return techs.map(tech => el('div', { class: 'item' }, techButton(domain, tech), note ? el('div', { class: 'md' }, md(note(tech))) : null));
+    return techs.map(tech => {
+      const n = note ? note(tech) : null;
+      return el('div', { class: 'item' }, techButton(domain, tech), n instanceof Node ? n : n ? el('div', { class: 'md' }, md(n)) : null);
+    });
+  }
+
+  /** The first `shown` items, the rest behind a "Show n more" disclosure. */
+  const capped = (items, shown = 10) => (items.length > shown + 2
+    ? [...items.slice(0, shown), el('details', {}, el('summary', { text: 'Show ' + (items.length - shown) + ' more' }), ...items.slice(shown))]
+    : items);
+
+  /** Related ATT&CK mitigations (by shared profile techniques) with their in-place switches; lead(id) may
+   *  return text to put before the overlap count. */
+  function relatedMitigationItems(domain, mits, what, lead) {
+    const model = state.models[domain];
+    return [...mits].map(([id, n]) => {
+      const m = model.byId.get(id);
+      if (!m) return null;
+      const first = lead ? lead(id) : null;
+      return el('div', { class: 'item' },
+        el('div', { class: 'hd' }, idLink(m),
+          el('button', { class: 'linkish grow', text: m.name, on: { click: () => openDrawer(() => mitigationDrawer(domain, m.id)) } }),
+          postureToggle('mitigations', domain, m.id, 'In place')),
+        el('div', { class: 'kicker', text: (first ? first + ' · shares ' : 'Shares ') + plural(n, 'profile technique', 'profile techniques') + ' with ' + what }));
+    }).filter(Boolean);
+  }
+
+  const ctidAttackVersion = key => (mappingSource(key) || { meta: {} }).meta.attackVersion || '?';
+  /**
+   * For an entry carried forward through revoked-by: "CTID mapped CM-5 to T1070.001 in ATT&CK 16.1; ATT&CK has
+   * since replaced it with this technique." target names the record it now counts for (the parent, via parent).
+   */
+  const carriedNote = (e, key, subject, target = 'this technique') => {
+    const ids = (e && e.fromAll) || [];
+    return ids.length ? 'CTID mapped ' + subject + ' to ' + ids.join(', ') + ' in ATT&CK ' + ctidAttackVersion(key)
+      + '; ATT&CK has since replaced ' + (ids.length === 1 ? 'it' : 'them') + ' with ' + target + '.' : null;
+  };
+  const entryFor = (ix, techId, capId) => (ix.byTech.get(techId) || []).find(e => e.capId === capId) || null;
+
+  /** A NIST SP 800-53 Rev 5 control, from the CTID mapping. */
+  function controlDrawer(domain, capId) {
+    const src = mappingSource('nist');
+    const ix = mappingIndex('nist', domain);
+    const cap = ix && ix.capabilities.get(capId);
+    const r = resultFor(domain);
+    const c = r && r.nist ? r.nist.controls.get(capId) : null;
+    const obj = c ? c.obj : { id: capId, attackId: capId, name: cap ? cap.name : capId, family: cap ? cap.group : '', familyName: cap ? cap.groupName : '', url: NIST_PAGE, kind: 'nist-control' };
+    const out = drawerHead('NIST SP 800-53 Rev 5 control', obj, el('div', { class: 'tags', style: 'margin-top:6px' },
+      obj.familyName ? el('span', { class: 'tag', title: 'Control family', text: (obj.family ? obj.family + ' · ' : '') + obj.familyName }) : null));
+    const text = src && src.details.get(capId);
+    if (text) {
+      out.push(el('details', { style: 'margin-top:10px' }, el('summary', { text: 'Description' }),
+        el('div', { class: 'md' }, ...text.split(/\n\s*\n/).map(t => el('p', { text: t.trim() })))));
+    }
+    if (cap) {
+      out.push(el('p', { class: 'hint', text: 'CTID maps ' + capId + ' to ' + plural(cap.techniques.size, 'technique', 'techniques') + ' in ' + domainTitle(domain) + ' v' + ix.attackVersion
+        + '. ThreatSim also counts a sub-technique for a control CTID mapped to its parent, unless CTID judged the sub-technique not mappable.' }));
+    }
+    if (c) {
+      out.push(el('section', {}, el('h3', { text: 'Profile techniques it mitigates (' + c.techniques.size + ' of ' + r.techniques.size + ')' }),
+        ...profileTechniqueList(domain, c.techniques, tech => {
+          const t = r.techniques.get(tech.id);
+          const parent = c.viaParent.has(tech.id) ? state.models[domain].byId.get(tech.parent) : null;
+          // the entry CTID's mapping gives (to the parent, via parent): it may have been carried forward from older IDs
+          const e = entryFor(ix, parent ? parent.id : tech.id, capId);
+          const older = e && e.fromAll && e.fromAll.length ? e.fromAll : null;
+          const comment = c.notes.get(tech.id);
+          return el('div', { class: 'note-line' }, t ? statusBadge(t.status) : null,
+            parent ? el('span', { class: 'tag via', text: 'via parent ' + parent.attackId, title: older
+              ? 'CTID maps ' + capId + ' to ' + older.join(', ') + ' (ATT&CK ' + ctidAttackVersion('nist') + '), since replaced by ' + parent.attackId + ' ' + parent.name + ', the parent technique'
+              : 'CTID maps ' + capId + ' to the parent technique ' + parent.attackId + ' ' + parent.name }) : null,
+            older ? el('div', { class: 'kicker', text: carriedNote(e, 'nist', capId, parent ? 'the parent technique ' + parent.attackId : 'this technique') }) : null,
+            comment ? el('div', { class: 'md' }, md(comment)) : null);
+        })));
+      if (c.mitigations.size) {
+        out.push(el('section', {}, el('h3', { text: 'Related ATT&CK mitigations (' + c.mitigations.size + ')' }),
+          el('p', { class: 'hint', text: 'ATT&CK mitigations of this profile that address the same techniques, most shared first. ' + RELATED_NOTE }),
+          ...capped(relatedMitigationItems(domain, c.mitigations, capId))));
+      }
+    } else if (r) {
+      out.push(el('p', { class: 'hint', text: 'None of this profile\'s techniques map to ' + capId + '.' }));
+    }
+    out.push(el('p', { class: 'small-print' }, 'Mapping: ', el('a', { href: NIST_PAGE, target: '_blank', rel: 'noopener', text: 'NIST 800-53 on the CTID Mappings Explorer' }),
+      ' (Apache-2.0)' + (src ? ', ' + src.meta.label : '') + '. NIST SP 800-53 is a NIST publication.'));
+    return out;
+  }
+
+  /** A CVE from the CISA KEV catalog, with the techniques CTID mapped it to. */
+  function cveDrawer(domain, cveId) {
+    const ix = mappingIndex('kev', domain);
+    const cap = ix && ix.capabilities.get(cveId);
+    const model = state.models[domain];
+    const r = resultFor(domain);
+    const c = r && r.kev ? r.kev.cves.get(cveId) : null;
+    const obj = c ? c.obj : { id: cveId, attackId: cveId, name: cap ? cap.name : cveId, type: cap ? cap.group : '', typeName: cap ? cap.groupName : '',
+      url: 'https://nvd.nist.gov/vuln/detail/' + encodeURIComponent(cveId), kind: 'kev-cve' };
+    const out = drawerHead('Known exploited vulnerability · ' + domainLabel(domain), obj, el('div', { class: 'tags', style: 'margin-top:6px' },
+      obj.typeName ? el('span', { class: 'tag', title: 'Vulnerability type', text: obj.typeName }) : null,
+      c ? el('span', { class: 'tag', text: plural(c.techniques.size, 'profile technique', 'profile techniques') }) : null));
+    // why it is listed: the profile uses some of its techniques (not a link between the CVE and the threats)
+    const expAll = exploitationTechs(ix, model, cveId);
+    const expIn = c ? expAll.filter(t => c.techniques.has(t.id)) : [];
+    if (c) {
+      out.push(el('p', { class: 'hint', style: 'margin-top:10px', text: 'CTID links CVEs to ATT&CK techniques, not to threat groups. This CVE is listed because the profile uses '
+        + plural(c.techniques.size, 'of its techniques', 'of its techniques')
+        + (expIn.length ? ', including its exploitation ' + (expIn.length === 1 ? 'technique ' : 'techniques ') + andList(expIn.map(t => t.attackId))
+          : expAll.length ? ', not its exploitation ' + (expAll.length === 1 ? 'technique' : 'techniques') + ' (' + andList(expAll.map(t => t.attackId + ' ' + t.name)) + ')' : '')
+        + '; that does not mean these threats are known to exploit it.' }));
+    }
+    if (cap) {
+      // CTID usually writes one note per CVE and repeats it on every technique: show it once
+      const counts = new Map();
+      for (const x of cap.mappings) if (x.comments) counts.set(x.comments, (counts.get(x.comments) || 0) + 1);
+      const common = [...counts].sort((a, b) => b[1] - a[1])[0];
+      const shared = common && common[1] > 1 ? common[0] : null;
+      if (shared) out.push(el('div', { class: 'md', style: 'margin-top:10px' }, md(shared)));
+      for (const [type, label] of KEV_ROLES) {
+        const maps = cap.mappings.filter(x => x.type === type);
+        const lost = cap.unresolved.filter(x => x.type === type);
+        if (!maps.length && !lost.length) continue;
+        out.push(el('section', {}, el('h3', { text: label + ' (' + (maps.length + lost.length) + ')' }),
+          ...maps.map(x => {
+            const tech = model.byId.get(x.tech);
+            const t = r && r.techniques.get(tech.id);
+            return el('div', { class: 'item' },
+              el('div', { class: 'hd' }, techButton(domain, tech), t ? statusBadge(t.status) : el('span', { class: 'muted small', text: 'not in this profile' })),
+              carriedNote(x, 'kev', cveId) ? el('div', { class: 'kicker', text: carriedNote(x, 'kev', cveId) }) : null,
+              x.comments && x.comments !== shared ? el('div', { class: 'md' }, md(x.comments)) : null);
+          }),
+          ...lost.map(x => el('div', { class: 'item' }, el('span', { class: 'mono', text: x.techniqueId }), ' ' + x.techniqueName,
+            el('div', { class: 'kicker', text: 'Not shown: ' + x.reason })))));
+      }
+      if (cap.references.length) {
+        out.push(el('section', {}, el('h3', { text: 'References (' + cap.references.length + ')' }),
+          el('ul', { class: 'refs' }, ...cap.references.map(u => el('li', {}, el('a', { href: u, target: '_blank', rel: 'noopener', text: u }))))));
+      }
+    }
+    out.push(el('p', {}, el('a', { href: obj.url, target: '_blank', rel: 'noopener', text: cveId + ' in the NVD' }), ' · ',
+      el('a', { href: KEV_CATALOG, target: '_blank', rel: 'noopener', text: 'CISA KEV catalog' })));
+    if (c && c.mitigations.size) {
+      // mitigations of its exploitation technique first (the others address what an attacker does after)
+      const addresses = id => expIn.filter(t => r.techniques.get(t.id).mitigations.includes(id));
+      const mits = [...c.mitigations].map(([id, n], i) => ({ id, n, i, exp: addresses(id) }))
+        .sort((a, b) => (b.exp.length ? 1 : 0) - (a.exp.length ? 1 : 0) || a.i - b.i);
+      const expOf = new Map(mits.map(x => [x.id, x.exp]));
+      out.push(el('section', {}, el('h3', { text: 'Related ATT&CK mitigations (' + c.mitigations.size + ')' }),
+        el('p', { class: 'hint', text: 'ATT&CK mitigations of this profile that address the same techniques' + (expIn.length ? ', those of its exploitation ' + (expIn.length === 1 ? 'technique' : 'techniques') + ' first' : '')
+          + '. ' + RELATED_NOTE }),
+        ...capped(relatedMitigationItems(domain, new Map(mits.map(x => [x.id, x.n])), cveId,
+          id => (expOf.get(id).length ? 'Mitigates its exploitation ' + (expOf.get(id).length === 1 ? 'technique ' : 'techniques ') + andList(expOf.get(id).map(t => t.attackId)) : null)))));
+    }
+    const src = mappingSource('kev');
+    out.push(el('p', { class: 'small-print', text: 'Mapping: CTID Mappings Explorer (Apache-2.0)' + (src ? ', ' + src.meta.label : '') + '. KEV is CISA\'s catalog of vulnerabilities exploited in the wild.' }));
+    return out;
+  }
+
+  /** Technique drawer sections for the CTID mappings (Enterprise: NIST and KEV; Mobile: KEV). */
+  function mappingSections(domain, techId) {
+    const model = state.models[domain];
+    const out = [];
+    // counts only when the mapping is there to count from ("(0)" would read as "nothing is mapped")
+    const heading = (text, ix, n) => el('h3', { text: text + (ix && ix.rowCount ? ' (' + n + ')' : '') });
+    if (MAP.nist.domains.includes(domain)) {
+      const ix = mappingIndex('nist', domain);
+      const list = ix ? SimEngine.controlsFor(ix, model, techId) : [];
+      const tech = model.byId.get(techId);
+      const parent = tech.isSubtechnique && tech.parent ? model.byId.get(tech.parent) : null;
+      const judged = ix ? ix.nonMappable.get(techId) : null;
+      // a not-mappable sub-technique does not take its parent's controls (see SimEngine.controlsFor)
+      const parentSkipped = ix && parent && !list.length && ix.nonMappable.has(techId) && (ix.byTech.get(parent.id) || []).length;
+      out.push(el('section', {}, heading('NIST 800-53 controls', ix, list.length),
+        !ix ? notPulledHint('nist') : !ix.rowCount ? el('p', { class: 'hint', text: 'The pulled NIST 800-53 mappings have no ' + domainTitle(domain) + ' entries.' })
+          : !list.length ? el('p', { class: 'hint', text: ix.nonMappable.has(techId)
+            ? 'CTID judged that no NIST 800-53 control maps to this technique' + (judged ? ': ' + withStop(judged) : '.')
+              + (parentSkipped ? ' So ThreatSim does not count the controls CTID mapped to its parent ' + parent.attackId + ' for it.' : '')
+            : 'CTID maps no NIST 800-53 Rev 5 control to this technique.' }) : null,
+        ...capped(list.map(({ entry: e, viaParent }) => {
+          const note = carriedNote(e, 'nist', e.capId, viaParent && parent ? 'the parent technique ' + parent.attackId : 'this technique');
+          return el('div', { class: 'item' },
+            el('div', { class: 'hd' }, el('span', { class: 'mono', text: e.capId }),
+              el('button', { class: 'linkish grow', text: e.capName, on: { click: () => openDrawer(() => controlDrawer(domain, e.capId)) } }),
+              viaParent && parent ? el('span', { class: 'tag via', title: 'CTID maps ' + e.capId + ' to the parent technique ' + parent.attackId + ' ' + parent.name, text: 'via parent ' + parent.attackId }) : null),
+            note ? el('div', { class: 'kicker', text: note }) : null,
+            e.comments ? el('div', { class: 'md' }, md(e.comments)) : null);
+        }), 12)));
+    }
+    if (MAP.kev.domains.includes(domain)) {
+      const ix = mappingIndex('kev', domain);
+      const list = ix ? SimEngine.cvesFor(ix, techId).sort((a, b) => idCmp(b.capId, a.capId)) : [];
+      // this section sits under "Used in this profile by …", whose procedures can name CVEs: say what links these
+      const r = resultFor(domain);
+      const inProfile = !!(r && r.techniques.has(techId));
+      out.push(el('section', {}, heading('Known exploited CVEs', ix, list.length),
+        !ix ? notPulledHint('kev') : !ix.rowCount ? el('p', { class: 'hint', text: 'The pulled KEV mappings have no ' + domainTitle(domain) + ' entries.' }) : !list.length ? el('p', { class: 'hint', text: 'CTID maps no CVE from the KEV catalog to this technique.' })
+          : el('p', { class: 'hint', text: 'CTID links these CVEs to this technique, not to threat groups' + (inProfile
+            ? ': they are listed for the technique, not because the threats in this profile are known to exploit them.' : '.') }),
+        ...capped(list.map(x => el('div', { class: 'item' },
+          el('div', { class: 'hd' }, el('a', { href: 'https://nvd.nist.gov/vuln/detail/' + encodeURIComponent(x.capId), target: '_blank', rel: 'noopener', class: 'mono', text: x.capId }),
+            el('button', { class: 'linkish grow', text: x.entry.capName, on: { click: () => openDrawer(() => cveDrawer(domain, x.capId)) } })),
+          el('div', { class: 'tags' }, [...x.types].map(t => el('span', { class: 'tag', text: roleName(t) }))))))));
+    }
+    return out;
   }
 
   function mitigationDrawer(domain, id) {
@@ -1205,6 +1847,16 @@
     if (e) {
       out.push(el('section', {}, el('h3', { text: 'Profile techniques it addresses (' + e.techniques.size + ' of ' + r.techniques.size + ')' }),
         ...profileTechniqueList(domain, e.techniques, tech => e.guidance.get(tech.id))));
+    }
+    if (e && r.nist) {
+      const ctl = [...r.nist.controls.values()].filter(c => c.mitigations.has(id)).sort((a, b) => b.mitigations.get(id) - a.mitigations.get(id) || byAttackId(a.obj, b.obj));
+      out.push(el('section', {}, el('h3', { text: 'NIST 800-53 controls for the same techniques (' + ctl.length + ')' }),
+        el('p', { class: 'hint', text: ctl.length ? 'Controls CTID mapped to the profile techniques this mitigation addresses, most shared first. ' + RELATED_NOTE
+          : 'None of the NIST 800-53 controls in CTID\'s mapping covers the techniques this mitigation addresses in this profile.' }),
+        ...capped(ctl.map(c => el('div', { class: 'item' },
+          el('div', { class: 'hd' }, el('span', { class: 'mono', text: c.obj.id }),
+            el('button', { class: 'linkish grow', text: c.obj.name, on: { click: () => openDrawer(() => controlDrawer(domain, c.obj.id)) } })),
+          el('div', { class: 'kicker', text: 'Shares ' + plural(c.mitigations.get(id), 'profile technique', 'profile techniques') + ' with ' + m.attackId }))))));
     }
     return out;
   }
@@ -1328,6 +1980,16 @@
     requestAnimationFrame(() => setTimeout(() => { clearTimeout(t); resolve(); }, 0));
   });
 
+  /** [{ source, title, label, attackVersion, frameworkVersion, pulledAt, files }] for each pulled mapping source. */
+  function mappingMetas() {
+    const titles = typeof MappingsDB !== 'undefined' && Array.isArray(MappingsDB.SOURCES) ? MappingsDB.SOURCES : [];
+    return Object.keys(MAP).map(mappingSource).filter(Boolean).map(({ meta }) => ({
+      source: meta.source, title: (titles.find(t => t.id === meta.source) || {}).title || meta.source, label: meta.label,
+      attackVersion: meta.attackVersion, frameworkVersion: meta.frameworkVersion, pulledAt: meta.pulledAt,
+      files: (meta.files || []).map(f => Object.assign({}, f)),
+    }));
+  }
+
   async function exportWorkpaper(e) {
     // Ignore clicks while an export runs, and the second click of a double-click.
     if (exportUi.busy || (e && e.detail > 1)) return;
@@ -1341,6 +2003,8 @@
       showAll: state.ui.showAll,
       kinds: PICK_TABS, entity, domainLabel, domainInfo, activityPurposes: purposesOf,
       platformsByDomain: Object.fromEntries(state.results.map(r => [r.domain, [...platformsFor(r.domain)]])),
+      // provenance of the CTID mappings pulled (r.nist and r.kev travel on the results)
+      mappings: mappingMetas(),
       generatedAt: new Date(),
     };
     Object.assign(exportUi, { busy: true, msg: '', err: false });
@@ -1432,6 +2096,7 @@
     metas.sort((a, b) => order.indexOf(a.domain) - order.indexOf(b.domain));
     for (const m of metas) state.models[m.domain] = await SimEngine.loadModel(m.domain);
     state.available = metas.map(m => m.domain).filter(d => state.models[d]);
+    await loadMappings();
 
     if (!restore() || !state.domains.size) {
       state.domains = new Set(state.available.filter(d => (AttackDB.DOMAINS.find(x => x.id === d) || {}).enabled !== false));
