@@ -4,7 +4,7 @@
  * for AI elements with the MAESTRO 7-layer framework and MITRE ATLAS.
  *
  * Global `TMEngine`. A port of the cyber-threat-modelling skill's STRIDE-LM engine (structural and
- * contextual gates, severity scoring, sequences and events), driven by the Simulator's threat profile:
+ * contextual gates, severity scoring, sequences and events), driven by the threat profile built on the Threat Profile tab:
  * the profile's techniques, grouped into themes, become the Sectorial Threat Profile lenses, and each
  * threat event cites the techniques MITRE attributes to the profile (◆) before generic ones. Every
  * technique, mitigation, detection strategy and case study comes from the local MITRE data (AttackDB),
@@ -619,7 +619,7 @@
 
   // ---------------------------------------------------------------- the profile
 
-  /** The Simulator profile in this model's terms: actors, their techniques (◆) and the evidence. */
+  /** The Threat Profile tab's profile in this model's terms: actors, their techniques (◆) and the evidence. */
   function profileOf(ctx, index) {
     const actors = [];
     const used = new Map();   // attackId -> { roots: Set(actor label), evidence: [text] }
@@ -797,7 +797,7 @@
     const generic = !profile.actors.length || !lenses.length;
     // why the ATT&CK pass is generic: no profile, or a profile whose techniques don't reach this architecture
     const profileIds = [...profile.used.keys()];
-    const genericWhy = !profile.actors.length ? 'No threat profile was built on the Simulator tab: a generic attacker is assumed.'
+    const genericWhy = !profile.actors.length ? 'No threat profile was built on the Threat Profile tab: a generic attacker is assumed.'
       : `${!profileIds.length ? `MITRE records no techniques for ${profile.who}`
         : profileIds.every(aid => aid.startsWith('AML.')) ? `${profile.who} ${profile.actors.length > 1 ? 'have' : 'has'} no ATT&CK techniques that bear on this architecture (${profile.actors.length > 1 ? 'their' : 'its'} techniques are ATLAS-only)`
           : `None of the ATT&CK techniques MITRE records for ${profile.who} falls into a threat theme this model reads`}, so the ATT&CK pass uses generic STRIDE-LM techniques, extrapolated to the profile.`;

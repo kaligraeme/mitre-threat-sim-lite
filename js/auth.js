@@ -182,7 +182,7 @@
     const hadFocus = !!old && old.contains(doc.activeElement);
     if (old) old.remove();
     if (account.isDefault) {
-      const width = header.querySelector('.wrap').className;   // same width as the page header (the Simulator's is wider)
+      const width = header.querySelector('.wrap').className;   // same width as the page header (the Threat Profile page's is wider)
       header.after(h('div', { id: 'authBanner', class: 'auth-banner', role: 'status' },
         h('div', { class: width },
           h('span', {}, 'You are signed in with the default password (admin). Change it so that nobody else can sign in with it.'),

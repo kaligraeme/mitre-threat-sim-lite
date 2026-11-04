@@ -1,8 +1,8 @@
 /*
  * threatmodel.js — the Threat Modelling tab: upload a diagram, check its decomposition (CSA §3.2), run
- * STRIDE-LM through the Simulator's threat profile (§3.3), and download the register and the DFD.
+ * STRIDE-LM through the threat profile built on the Threat Profile tab (§3.3), and download the register and the DFD.
  *
- * Reads the Simulator's saved profile (localStorage threatsim.sim.v1) and the MITRE data in AttackDB.
+ * Reads the Threat Profile tab's saved profile (localStorage threatsim.sim.v1) and the MITRE data in AttackDB.
  * Claude is used only when the server says it has an API key (api/tm/status) and the user asks for it: to
  * read a picture of a diagram, and to write the threat events in more detail. Everything else runs in this
  * browser. The decomposition being worked on is kept in this browser for the user who made it.
@@ -237,12 +237,12 @@
       ? { viaSoftware: s.opts.viaSoftware !== false, viaCampaigns: s.opts.viaCampaigns !== false }
       : { viaSoftware: true, viaCampaigns: true };
   }
-  // what the threat model depends on in the Simulator's saved state (it also keeps its own view settings there)
+  // what the threat model depends on in the Threat Profile tab's saved state (it also keeps its own view settings there)
   const profileKey = () => JSON.stringify([Object.keys(KINDS).map(k => [...state.selection[k]].sort()), state.opts]);
 
   /**
-   * The Simulator's scope settings that the threat model doesn't follow, as [platforms, domains switched off]:
-   * its platform filter, and the knowledge bases switched off there (as the Simulator reads its saved state).
+   * The Threat Profile tab's scope settings that the threat model doesn't follow, as [platforms, domains switched off]:
+   * its platform filter, and the knowledge bases switched off there (as the Threat Profile tab reads its saved state).
    */
   function simScope() {
     const s = store.get(SIM_KEY);
@@ -255,8 +255,8 @@
   const listOf = a => (a.length > 1 ? `${a.slice(0, -1).join(', ')} and ${a[a.length - 1]}` : a.join(''));
   const domainTitle = d => (AttackDB.DOMAINS.find(x => x.id === d) || {}).title || d;
 
-  let shownScope = '';   // the Simulator scope the card last spoke of
-  /** Why the counts here can differ from the Simulator's: the scope settings there that don't apply here, said plainly. */
+  let shownScope = '';   // the Threat Profile scope the card last spoke of
+  /** Why the counts here can differ from the Threat Profile tab's: the scope settings there that don't apply here, said plainly. */
   function scopeNote() {
     const [platforms, off] = JSON.parse(shownScope || simScope());
     if (!platforms.length && !off.length) return null;
@@ -266,8 +266,8 @@
       ? `it matches each element to the techniques of the platforms it runs on, worked out from its context${off.length ? ', and uses every knowledge base pulled in this browser' : ''}`
       : 'it uses every knowledge base pulled in this browser, for the elements each applies to';
     return el('p', { class: 'note', id: 'scopeNote', style: 'margin:6px 0 0' },
-      `On the Simulator, ${there.join(', and ')}. The threat model doesn’t use ${there.length > 1 ? 'either' : platforms.length ? 'that filter' : 'that setting'}: `
-      + `${how}, so the counts here can differ from the Simulator’s.`);
+      `On the Threat Profile tab, ${there.join(', and ')}. The threat model doesn’t use ${there.length > 1 ? 'either' : platforms.length ? 'that filter' : 'that setting'}: `
+      + `${how}, so the counts here can differ from the Threat Profile tab’s.`);
   }
 
   function profileSummary() {
@@ -296,7 +296,7 @@
     const parts = [];
     if (roots.length) {
       parts.push(el('p', { class: 'lead' }, 'The threat model is driven by the profile you built on the ',
-        el('a', { href: 'simulator.html', text: 'Simulator tab' }), ':'));
+        el('a', { href: 'simulator.html', text: 'Threat Profile tab' }), ':'));
       parts.push(el('div', { class: 'chips' }, roots.map(r => el('span', { class: 'chip', title: KINDS_LABEL(r) }, `${r.name} (${r.attackId})`))));
       parts.push(el('p', { class: 'note', style: 'margin:8px 0 0' },
         `${techniques.attack.size} ATT&CK technique${techniques.attack.size === 1 ? '' : 's'}`
@@ -304,7 +304,7 @@
         + ` · MITRE data: ${versions.join(', ')}`));
       parts.push(scopeNote());
     } else {
-      parts.push(el('p', {}, 'No threat profile yet. ', el('a', { href: 'simulator.html', text: 'Build one on the Simulator tab' }),
+      parts.push(el('p', {}, 'No threat profile yet. ', el('a', { href: 'simulator.html', text: 'Build one on the Threat Profile tab' }),
         ' — pick the groups, software, campaigns or ATLAS case studies the sector faces. Without one, the model assumes a generic external attacker.'));
       parts.push(el('p', { class: 'note' }, `MITRE data: ${versions.join(', ')}`));
     }
@@ -2294,18 +2294,18 @@
     if (e.key === null || (CLAUDE_KEY && e.key === CLAUDE_KEY)) $('#enrichChk').checked = state.claude.available && claudeChosen();
     // the decomposition, saved or cleared in another tab of this page
     if (TM_KEY && (e.key === TM_KEY || e.key === null)) follow();
-    // The Simulator may change the profile in another tab, also while this page is still loading the MITRE data.
+    // The Threat Profile tab may change the profile in another browser tab, also while this page is still loading the MITRE data.
     if (e.key !== SIM_KEY && e.key !== null) return;
     const before = state.selection ? profileKey() : '';
     readProfile();
     if (profileKey() === before) {
-      // only the Simulator's own settings changed; its platform filter and knowledge bases are said on the card
+      // only the Threat Profile tab's own settings changed; its platform filter and knowledge bases are said on the card
       if (state.loaded && simScope() !== shownScope) renderProfile();
       return;
     }
     if (state.loaded) renderProfile();
     state.rev++;
-    markStale('The threat profile has changed on the Simulator tab since the last run. Run the model again to update the results and downloads.');
+    markStale('The threat profile has changed on the Threat Profile tab since the last run. Run the model again to update the results and downloads.');
   });
 
   // An edit not saved yet is saved as soon as the user turns to another tab or window, so that one takes it up;

@@ -6,7 +6,7 @@
     python3 server.py --set-password admin    # set or reset a password (creates the account if new)
 
 Without a session, only the sign-in page (login.html) and the stylesheet and script it needs are
-served. Every other page and script, including the Data page (index.html) and the Simulator, needs
+served. Every other page and script, including the Data page (index.html) and the Threat Profile page (simulator.html), needs
 a signed-in session; a page asked for without one redirects to login.html, anything else gets 401.
 
 Accounts are kept in <data dir>/users.json as PBKDF2-HMAC-SHA-256 hashes (310,000 iterations,

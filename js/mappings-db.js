@@ -3,7 +3,7 @@
  * ATT&CK techniques, pulled from GitHub into a local IndexedDB database of their own (`threatsim-mappings`).
  *
  * Exposes a global `MappingsDB`. The mappings are kept apart from `mitre-attack-db` on purpose: the Data page,
- * the Simulator and the Threat Modelling page treat every row of that database's `meta` store as an ATT&CK or
+ * the Threat Profile and Threat Modelling pages treat every row of that database's `meta` store as an ATT&CK or
  * ATLAS knowledge base.
  *
  * Stores

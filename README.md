@@ -12,7 +12,7 @@ Vulnerabilities** catalog, using the Center for Threat-Informed Defense's (CTID)
 - **Sign in** (`login.html`): the only page anyone can open without signing in.
 - **Data** (`index.html`): pull MITRE ATT&CK and ATLAS releases, and CTID's NIST 800-53 and KEV
   mappings, into the local database.
-- **Simulator** (`simulator.html`): build a threat profile and map it to mitigations and detections.
+- **Threat Profile** (`simulator.html`): build a threat profile and map it to mitigations and detections.
 - **Threat Modelling** (`threatmodel.html`): threat-model an architecture or network diagram with that
   profile, to the CSA Guide to Cyber Threat Modelling, and download the threat register and the
   data-flow diagram with threats.
@@ -21,7 +21,7 @@ Vulnerabilities** catalog, using the Center for Threat-Informed Defense's (CTID)
 
 ThreatSim runs behind its own small server, `server.py`, which checks the session on every request.
 Until you sign in it serves only the sign-in page and the stylesheet and script that page needs. The
-Data page, the Simulator and all their scripts are refused: pages redirect to sign-in, anything else
+Data page, the Threat Profile and Threat Modelling pages and all their scripts are refused: pages redirect to sign-in, anything else
 gets 401. Run it as described under [Run](#run). Don't serve the folder with any other web server:
 anyone could then download the app's files without signing in. (The pages notice and refuse to start,
 and the sign-in page says why, but the files are out.)
@@ -49,13 +49,16 @@ and the sign-in page says why, but the files are out.)
   sessions end.
 
 Your browser downloads the MITRE data straight from GitHub and keeps it in its own database
-(IndexedDB), as before. The server only serves the app. That data, and the Simulator's threat profile
+(IndexedDB), as before. The server only serves the app. That data, and the threat profile built on the Threat Profile tab
 and posture, belong to the browser and the exact address you open, not to the account. Every account
 that signs in from that browser shares them, and they stay after sign-out, so people who share a
 computer should use separate browser profiles. `localhost` and `127.0.0.1` count as different
 addresses, so keep to one.
 
-## Simulator
+## Threat Profile
+
+The **Threat Profile** tab (`simulator.html`; it was called *Simulator* before) builds the threat profile and
+maps it to mitigations and detections.
 
 1. **Profile:** pick threats in each knowledge base's own categories, by search or with filters:
    - **ATT&CK:** Groups, Software and Campaigns (filters: description keywords, software type and
@@ -126,7 +129,7 @@ matches them to the stored ATT&CK release by technique ID. A technique ATT&CK ha
 carried forward to its replacement (for example T1562.001 is now T1685); an ID with no current technique
 is listed as not current and left out. Each tab, and the workpaper's summary, list those IDs.
 
-In the Simulator:
+On the Threat Profile tab:
 
 - **800-53** (Enterprise only): how many profile techniques have at least one control, which have none
   and which CTID judged not mappable, then one row per control with its family, the profile techniques
@@ -152,7 +155,7 @@ NIST SP 800-53 is a NIST publication; the KEV catalog is CISA's.
 
 ## Excel workpaper
 
-**Export workpaper**, in the toolbar beside the threat profile on the Simulator tab, writes the current
+**Export workpaper**, in the toolbar beside the threat profile on the Threat Profile tab, writes the current
 profile and posture to an `.xlsx` workbook:
 
 | Sheet | Contents |
@@ -203,13 +206,13 @@ export. ATLAS YAML is parsed with [js-yaml](https://github.com/nodeca/js-yaml) 4
 
 The **Threat Modelling** tab carries out cyber threat modelling to the *Guide to Cyber Threat Modelling*
 of the Cyber Security Agency of Singapore (CSA), Section 3, over an architecture or network diagram. It
-uses the threat profile built on the Simulator tab as the Sectorial Threat Profile, and produces the two
+uses the threat profile built on the Threat Profile tab as the Sectorial Threat Profile, and produces the two
 deliverables a CSA threat model is judged on. It is a port of the `cyber-threat-modelling` skill's
 method (STRIDE-LM gates, severity scoring, ATT&CK attack modelling), driven by ThreatSim's own MITRE data.
 
 1. **Threat profile.** The groups, software and campaigns (ATT&CK) and case studies, entities and
-   software (ATLAS) picked on the Simulator tab. With no profile, a generic external attacker is assumed.
-   The Simulator's platform filter and knowledge-base switches don't apply here: techniques are matched
+   software (ATLAS) picked on the Threat Profile tab. With no profile, a generic external attacker is assumed.
+   The Threat Profile tab's platform filter and knowledge-base switches don't apply here: techniques are matched
    to each element's own platforms, and the profile card says so.
 2. **Architecture diagram.** Choose a file or drop it on the page:
 
@@ -568,13 +571,13 @@ ATLAS (domain `atlas`) is stored in the same records, keyed by ATLAS ID (`atlas|
 | Software | `software` | `softwareType` (tool / malware), `softwareCategories`, `aliases` |
 
 Every ATLAS record also keeps `references` and, where ATLAS gives one, `attackRef` (the matching ATT&CK
-object). ATLAS relationships keep their own type in `atlasType` and map to the `relType` the simulator
+object). ATLAS relationships keep their own type in `atlasType` and map to the `relType` the Threat Profile tab
 walks: `employs` (case study → technique), `implements` (software → technique) and `uses` become `uses`;
 `specializes` becomes `subtechnique-of`; `mitigates` and `attributed-to` keep their names. `reported-by` is
-reporting provenance, never attribution, so the simulator doesn't follow it. Case-study steps keep their
+reporting provenance, never attribution, so the Threat Profile tab doesn't follow it. Case-study steps keep their
 `tactic`, `stepId` and `leadsTo`.
 
-Mapping paths the simulator will use:
+Mapping paths the Threat Profile tab follows:
 
 ```
 Group / Software / Campaign --uses--> Technique
@@ -596,7 +599,7 @@ Technique (ICS) --targets--> Asset
 | `details` | `<source>\|<id>` | NIST control descriptions, as plain text |
 | `history` | auto | log of mapping pulls (shown with the MITRE pulls on the Data page) |
 
-Technique IDs stay as CTID wrote them (ATT&CK 16.1); the Simulator matches them to the stored ATT&CK
+Technique IDs stay as CTID wrote them (ATT&CK 16.1); the Threat Profile tab matches them to the stored ATT&CK
 release when it loads, following `revoked-by` relationships to replacements.
 
 ## API for other pages (`js/attack-db.js`, global `AttackDB`)
