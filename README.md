@@ -6,14 +6,14 @@ A browser-based cyber threat simulator. It keeps a local copy of the MITRE ATT&C
 **ICS** datasets (Mobile is available but off by default) and of **MITRE ATLAS**, the knowledge base of
 threats to AI systems. It maps ATT&CK Groups, Software and Campaigns, and ATLAS Case Studies, Entities and
 Software, to the techniques they use, then to the relevant mitigations and detections. It also maps the
-profile's techniques to **NIST SP 800-53 Rev 5** controls and to CVEs in **CISA's Known Exploited
-Vulnerabilities** catalog, using the Center for Threat-Informed Defense's (CTID) published mappings.
+profile's techniques to **NIST SP 800-53 Rev 5** controls, using the Center for Threat-Informed Defense's
+(CTID) published mappings.
 
 ## Pages
 
 - **Sign in** (`login.html`): the only page anyone can open without signing in.
-- **Data** (`index.html`): pull MITRE ATT&CK and ATLAS releases, and CTID's NIST 800-53 and KEV
-  mappings, into the local database.
+- **Data** (`index.html`): pull MITRE ATT&CK and ATLAS releases, and CTID's NIST 800-53 mappings, into
+  the local database.
 - **Threat Profile** (`simulator.html`): build a threat profile and map it to mitigations and detections.
 
 ## Sign-in
@@ -81,8 +81,8 @@ maps it to mitigations and detections.
      **Mark top 5**, to see how much exposure is left.
    - **Telemetry:** the data components and log sources the detections rely on.
    - **ICS assets:** assets targeted by the profile's ICS techniques.
-   - **800-53** and **KEV:** the NIST SP 800-53 Rev 5 controls that mitigate the profile's techniques,
-     and the known exploited CVEs mapped to them (see [Control and vulnerability mappings](#control-and-vulnerability-mappings-ctid)).
+   - **800-53:** the NIST SP 800-53 Rev 5 controls that mitigate the profile's techniques (see
+     [Control mappings](#control-mappings-ctid)).
    - Click any row or matrix cell for details: procedure examples, mitigation guidance, and analytics
      with their log sources. ATLAS details add technique maturity, mitigation categories and AI
      lifecycle phases, attribution with its activity purpose, the matching ATT&CK object where ATLAS
@@ -121,32 +121,29 @@ scores share a priority number and are ordered by reach, documented procedure ex
 so the result doesn't depend on the order you picked threats in. Your selections and
 posture are saved in the browser's localStorage.
 
-## Control and vulnerability mappings (CTID)
+## Control mappings (CTID)
 
-The Data page pulls two datasets from CTID's
+The Data page pulls one dataset from CTID's
 [Mappings Explorer](https://github.com/center-for-threat-informed-defense/mappings-explorer)
-(Apache 2.0), in a second group of cards, *Control and vulnerability mappings (CTID)*:
+(Apache 2.0), in a second group of cards, *Control mappings (CTID)*:
 
 - **NIST SP 800-53 Rev 5:** which security controls mitigate the Enterprise ATT&CK techniques CTID
   mapped (with CTID's comment where it gave one, which is rare, and a list of techniques it judged not
   mappable), and (when available) NIST's description of each control. Techniques added to ATT&CK after
   the release CTID mapped have no controls.
-- **CISA Known Exploited Vulnerabilities:** for a selection of the CVEs in CISA's catalog, the ATT&CK
-  techniques used to exploit each one and its primary and secondary impacts. CTID has mapped only part of
-  the catalog (419 Enterprise and 14 Mobile CVEs, 424 in all, in its 28 Jul 2025 files): a CVE that isn't
-  listed hasn't been mapped by CTID, which doesn't mean it isn't exploited.
 
-They take part in the same Pull, version pickers, *Re-pull*, history and *Clear local database* as the
-MITRE data, and are stored in a browser database of their own (`threatsim-mappings`). CTID publishes no
+It takes part in the same Pull, version picker, *Re-pull*, history and *Clear local database* as the
+MITRE data, and is stored in a browser database of its own (`threatsim-mappings`). CTID publishes no
 index of its files, so the page reads GitHub's file listing (api.github.com allows 60 unauthenticated
 calls an hour; the page reuses a listing it read in the last hour, and **Check for updates** reads it
 again). If the listing can't be read, the page uses the files known when ThreatSim was written and says
-so: newer files may exist.
+so: newer files may exist. Mappings of a dataset this edition doesn't offer, left in the browser by
+another edition of ThreatSim, are ignored, and only *Clear local database* removes them.
 
-**Matching to ATT&CK.** CTID mapped these to ATT&CK 16.1 (older versions to older releases); ThreatSim
-matches them to the stored ATT&CK release by technique ID. A technique ATT&CK has since revoked is
+**Matching to ATT&CK.** CTID mapped NIST 800-53 to ATT&CK 16.1 (older versions to older releases);
+ThreatSim matches it to the stored ATT&CK release by technique ID. A technique ATT&CK has since revoked is
 carried forward to its replacement (for example T1562.001 is now T1685); an ID with no current technique
-is listed as not current and left out. Each tab, and the workpaper's summary, list those IDs.
+is listed as not current and left out. The 800-53 tab, and the workpaper's summary, list those IDs.
 
 On the Threat Profile tab:
 
@@ -156,21 +153,14 @@ On the Threat Profile tab:
   also counts for a control CTID mapped to its parent technique, marked *via parent* (ThreatSim's rule,
   not CTID's), unless CTID judged that sub-technique not mappable; a control mapped only to a
   sub-technique never counts for the parent.
-- **KEV** (Enterprise and Mobile, exact technique matches only): the CVEs mapped to profile techniques,
-  with each technique's role (exploitation technique, primary impact, secondary impact). CTID links CVEs
-  to techniques, not to threat groups: a CVE is listed because the profile uses one of its techniques,
-  not because the selected threats are known to exploit it, nor because it is in your systems. CVEs whose
-  exploitation technique is in the profile come first, and **Only CVEs exploited through a profile
-  technique** hides the rest. Mobile CVEs need Mobile ATT&CK pulled and switched on.
 - **Related ATT&CK mitigations** are ThreatSim's own link, not part of CTID's mapping: the profile's
-  ATT&CK mitigations that address the same techniques as a control or CVE.
+  ATT&CK mitigations that address the same techniques as a control.
 - Drawers: a control shows NIST's description, the profile techniques it mitigates with CTID's notes and
-  the related mitigations; a CVE shows its techniques by role, references, and links to the NVD and the
-  CISA catalog; technique details list their controls and CVEs, and mitigation details list the controls
-  for the same techniques.
-- ICS ATT&CK and ATLAS have no such mappings, and their results say so.
+  the related mitigations; technique details list their controls, and mitigation details list the
+  controls for the same techniques.
+- Mobile ATT&CK, ICS ATT&CK and ATLAS have no such mappings, and their results say so.
 
-NIST SP 800-53 is a NIST publication; the KEV catalog is CISA's.
+NIST SP 800-53 is a NIST publication.
 
 ## Excel workpaper
 
@@ -189,7 +179,6 @@ profile and posture to an `.xlsx` workbook:
 | Analytics | One row per analytic log source: what to collect and what to look for, with the strategy's live deployment status |
 | Control Map | Each technique-to-control link, with the control's live status and how the mitigation applies |
 | NIST 800-53 | One row per NIST SP 800-53 Rev 5 control that CTID maps to a profile technique or to its parent technique (ThreatSim's roll-up, marked *via*): the techniques it mitigates (and how many through a parent technique), live counts of the gaps it addresses and of the techniques not fully covered, related ATT&CK mitigations and how many are in place (live), and CTID's comment where it gave one (rare) |
-| Known Exploited CVEs | One row per CVE, role and profile technique: the CVE (linked to the NVD), the vulnerability and its type, the technique's role, the technique's live coverage, CTID's note and references |
 
 The drop-downs start at the posture you set in ThreatSim. Everything that depends on them is a formula:
 technique coverage, the readiness figures and bars, the matrix status column and the columns marked
@@ -198,12 +187,12 @@ technique coverage, the readiness figures and bars, the matrix status column and
 statuses in ThreatSim and export again. Controls with equal priority scores share a priority number and
 are listed by reach, documented procedure examples, then ID.
 
-The NIST 800-53 and Known Exploited CVEs sheets inform but don't change readiness; the summary's
-*Mappings (CTID)* row names the datasets and versions, and lists technique IDs carried forward or not
-current. *Profile at a glance* counts the controls and CVEs and the profile techniques with no 800-53
-control. When a mapping is used, the summary also carries source and licence rows for CTID's Mappings
-Explorer (Apache 2.0), NIST SP 800-53 and CISA's KEV catalog. Each sheet is always present and says why
-when it has no rows (not pulled, no Enterprise or Mobile techniques, nothing mapped).
+The NIST 800-53 sheet informs but doesn't change readiness; the summary's *Mappings (CTID)* row names
+the dataset and version, and lists technique IDs carried forward or not current. *Profile at a glance*
+counts the controls and the profile techniques with no 800-53 control. When the mapping is used, the
+summary also carries source and licence rows for CTID's Mappings Explorer (Apache 2.0) and NIST SP 800-53.
+The sheet is always present and says why when it has no rows (not pulled, no Enterprise techniques,
+nothing mapped).
 
 Workbooks that include ATLAS name each domain by its own title (for example *ATLAS v2026.10*), show
 each ATLAS threat's case type and activity purpose, note that ATLAS's detection controls are
@@ -469,8 +458,8 @@ Technique (ICS) --targets--> Asset
 
 | Store | Key | Contents |
 |---|---|---|
-| `meta` | source (`nist-800-53-r5`, `kev`) | stored version, ATT&CK version it maps to, files with their URLs, pulled-at, counts |
-| `rows` | `<source>\|<domain>\|<n>` | one CTID mapping: `capabilityId` (NIST form, `AC-2`; or the CVE), name, group (control family or vulnerability type), `mappingType`, `techniqueId` and name as CTID wrote them, `comments`, `references`, `status` |
+| `meta` | source (`nist-800-53-r5`) | stored version, ATT&CK version it maps to, files with their URLs, pulled-at, counts |
+| `rows` | `<source>\|<domain>\|<n>` | one CTID mapping: `capabilityId` (NIST form, `AC-2`), name, group (control family), `mappingType`, `techniqueId` and name as CTID wrote them, `comments`, `references`, `status` |
 | `details` | `<source>\|<id>` | NIST control descriptions, as plain text |
 | `history` | auto | log of mapping pulls (shown with the MITRE pulls on the Data page) |
 

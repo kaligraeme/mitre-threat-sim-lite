@@ -1235,45 +1235,28 @@
         + 'Source: https://github.com/center-for-threat-informed-defense/mappings-explorer'] : null,
       nist ? ['NIST SP 800-53', 'NIST Special Publication 800-53 Revision 5, Security and Privacy Controls for Information Systems and Organizations, is a publication of the '
         + 'National Institute of Standards and Technology (NIST). Control names and families are as CTID\'s mapping gives them.'] : null,
-      kev ? ['CISA KEV catalog', 'The Known Exploited Vulnerabilities catalog is published by the Cybersecurity and Infrastructure Security Agency (CISA): '
-        + 'https://www.cisa.gov/known-exploited-vulnerabilities-catalog. CVE IDs link to the National Vulnerability Database (https://nvd.nist.gov).'] : null,
     ];
   }
 
-  /** The 'Sheets' row's text for the NIST 800-53 and Known Exploited CVEs sheets. */
+  /** The 'Sheets' row's text for the NIST 800-53 sheet. */
   function mappingSheets(P) {
-    const used = usedMappings(P);
-    const out = [];
-    if (used.includes('nist')) {
-      out.push('NIST 800-53: the NIST SP 800-53 Rev 5 controls CTID maps to the profile\'s Enterprise techniques (or to their parent techniques), '
-        + 'with live counts of the gaps each addresses and of its related ATT&CK mitigations in place. '
-        + 'Related ATT&CK mitigations are ThreatSim\'s link, not CTID\'s: the profile\'s ATT&CK mitigations that address the same techniques as the control. CTID maps controls to techniques only.');
-    }
-    if (used.includes('kev')) {
-      out.push('Known Exploited CVEs: CVEs from CISA\'s KEV catalog that CTID maps to profile techniques, one row per CVE, role and technique, with the technique\'s live coverage.');
-    }
-    const empty = ['nist', 'kev'].filter(k => !used.includes(k)).map(k => SHEET[k === 'nist' ? 'nist' : 'cves']);
-    if (empty.length) out.push(`${empty.join(' and ')}: ${empty.length > 1 ? 'empty for this profile; each sheet says why' : 'empty for this profile; the sheet says why'}.`);
-    return out.join(' ');
+    if (!usedMappings(P).includes('nist')) return `${SHEET.nist}: empty for this profile; the sheet says why.`;
+    return 'NIST 800-53: the NIST SP 800-53 Rev 5 controls CTID maps to the profile\'s Enterprise techniques (or to their parent techniques), '
+      + 'with live counts of the gaps each addresses and of its related ATT&CK mitigations in place. '
+      + 'Related ATT&CK mitigations are ThreatSim\'s link, not CTID\'s: the profile\'s ATT&CK mitigations that address the same techniques as the control. CTID maps controls to techniques only.';
   }
 
-  /** The 'Limits' row's sentences on the CTID mappings (none when the workbook uses neither). */
+  /** The 'Limits' row's sentences on the CTID mapping (none when the workbook doesn't use it). */
   function mappingLimits(P) {
-    const used = usedMappings(P);
-    if (!used.length) return '';
-    const sheets = used.map(k => SHEET[k === 'nist' ? 'nist' : 'cves']);
-    const what = used.length > 1 ? 'controls and CVEs' : used[0] === 'nist' ? 'controls' : 'CVEs';
-    // the ATT&CK release each mapping targets, against the release of each domain it is matched to
-    const pairs = used.flatMap(k => P.domains.filter(D => D[k]).map(D => cmpVersion(P.mappings[k] && P.mappings[k].attackVersion, D.version)));
-    const versions = uniq(used.map(k => (P.mappings[k] && P.mappings[k].attackVersion) || '?'));
-    const target = versions.length === 1 ? `ATT&CK ${versions[0]}` : used.map(k => `ATT&CK ${(P.mappings[k] && P.mappings[k].attackVersion) || '?'} (${k === 'nist' ? 'NIST 800-53' : 'KEV'})`).join(' and ');
+    if (!usedMappings(P).includes('nist')) return '';
+    const version = (P.mappings.nist && P.mappings.nist.attackVersion) || '?';
+    // the ATT&CK release the mapping targets, against the release of each domain it is matched to
+    const pairs = P.domains.filter(D => D.nist).map(D => cmpVersion(P.mappings.nist && P.mappings.nist.attackVersion, D.version));
     const matched = pairs.every(d => d === 0) ? 'matched by technique ID'
-      : pairs.every(d => d < 0) ? `${versions.length > 1 ? 'earlier releases' : 'an earlier release'} than this workbook's, matched to it by technique ID`
+      : pairs.every(d => d < 0) ? 'an earlier release than this workbook\'s, matched to it by technique ID'
         : 'matched to this workbook\'s release by technique ID';
-    return ` The ${what} on the ${sheets.join(' and ')} ${sheets.length > 1 ? 'sheets' : 'sheet'} come from CTID's mappings to ${target}, ${matched}; `
-      + 'they inform but do not change readiness.'
-      + (used.includes('kev') ? ' A Known Exploited CVEs row means CISA lists the CVE as exploited in the wild and CTID maps it to a technique this profile uses, '
-        + 'not that the selected threats are known to exploit it or that the vulnerability is present in your systems.' : '');
+    return ` The controls on the ${SHEET.nist} sheet come from CTID's mappings to ATT&CK ${version}, ${matched}; `
+      + 'they inform but do not change readiness.';
   }
 
   function writeSummary(ws, ctx, P, Ls) {
@@ -1712,7 +1695,6 @@
     const analytics = wb.addWorksheet(SHEET.analytics);
     const map = wb.addWorksheet(SHEET.map);
     const nist = wb.addWorksheet(SHEET.nist);
-    const cves = wb.addWorksheet(SHEET.cves);
 
     const LT = layout(SHEET.techniques, TECH_COLS, P.techniques.length);
     const LM = layout(SHEET.mitigations, MIT_COLS, P.mitigations.length);
@@ -1722,7 +1704,6 @@
     const LAn = layout(SHEET.analytics, ANALYTIC_COLS, P.analytics.length);
     const LMap = layout(SHEET.map, MAP_COLS, P.map.length);
     const LN = layout(SHEET.nist, NIST_COLS, P.nist.length);
-    const LK = layout(SHEET.cves, KEV_COLS, P.kev.length);
 
     writeSummary(summary, ctx, P, { T: LT, M: LM, D: LD });
     P.domains.forEach((D, i) => writeMatrix(matrices[i], D, ctx, LT));
@@ -1734,7 +1715,6 @@
     writeAnalytics(analytics, P, LAn, LD);
     writeMap(map, P, LMap, LM, LD, LT);
     writeNist(nist, P, LN, LT, LM);
-    writeCves(cves, P, LK, LT);
 
     const stamp = profileNames(ctx) + ' · generated ' + P.generated.toLocaleDateString(undefined, { dateStyle: 'medium' });
     for (const ws of wb.worksheets) footer(ws, stamp);
@@ -1743,7 +1723,7 @@
     // _xlnm._FilterDatabase name that Excel writes. ExcelJS cannot write hidden names, so add
     // them to workbook.xml as it is written.
     const xmlText = t => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const filterNames = [[techniques, LT], [mitigations, LM], [detections, LD], [assets, LA], [telemetry, LTel], [analytics, LAn], [map, LMap], [nist, LN], [cves, LK]]
+    const filterNames = [[techniques, LT], [mitigations, LM], [detections, LD], [assets, LA], [telemetry, LTel], [analytics, LAn], [map, LMap], [nist, LN]]
       .map(([ws, L]) => `<definedName name="_xlnm._FilterDatabase" localSheetId="${wb.worksheets.indexOf(ws)}" hidden="1">`
         + xmlText(`${quoteSheet(ws.name)}!$A$1:$${colLetter(L.cols.length)}$${L.last}`) + '</definedName>')
       .join('');
