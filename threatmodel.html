@@ -13,11 +13,22 @@
     --sev-medium: #ed7d31; --sev-medium-ink: #0b0b0b;
     --sev-low: #ffc000; --sev-low-ink: #0b0b0b;
     --sev-high-text: #c00000;   /* the High red as text on the page's surface */
+    /* the DFD preview: CSA notation (blue shapes, red dashed zones, dark red outer zones) on paper */
+    --dfd-paper: #ffffff; --dfd-ink: #1b1f24; --dfd-shape: #41719c; --dfd-zone: #e00000; --dfd-outer: #c00000;
+    --dfd-flow: #3a3f46; --dfd-flow-ink: #3a3f46;
   }
   @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) { --sev-high-text: #ff6b62; }
+    :root:not([data-theme="light"]) {
+      --sev-high-text: #ff6b62;
+      --dfd-paper: #161b22; --dfd-ink: #e6e9ee; --dfd-shape: #7fb2e5; --dfd-zone: #ff6b62; --dfd-outer: #ff9a8f;
+      --dfd-flow: #aab4c0; --dfd-flow-ink: #c9d1d9;
+    }
   }
-  :root[data-theme="dark"] { --sev-high-text: #ff6b62; }
+  :root[data-theme="dark"] {
+    --sev-high-text: #ff6b62;
+    --dfd-paper: #161b22; --dfd-ink: #e6e9ee; --dfd-shape: #7fb2e5; --dfd-zone: #ff6b62; --dfd-outer: #ff9a8f;
+    --dfd-flow: #aab4c0; --dfd-flow-ink: #c9d1d9;
+  }
   .wrap.wide { max-width: 1400px; }
   .steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 16px; }
   .step > h2 { display: flex; align-items: baseline; gap: 10px; font-size: 17px; }
@@ -42,10 +53,13 @@
   .drop input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; }
   .formats { font-size: 13px; color: var(--muted); }
 
-  /* the picture beside the editor */
+  .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+  /* the picture: beside the DFD preview (Claude's reading), or on its own above the editor (decomposed by hand) */
   .picture { margin: 12px 0 0; }
-  .picture summary { cursor: pointer; font-size: 14px; color: var(--muted); }
-  .picture-frame { margin-top: 8px; max-height: 70vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+  .picture > summary { cursor: pointer; font-size: 14px; color: var(--muted); }
+  .picture .dfd-fig { margin-top: 8px; }
+  .picture .dfd-fig figcaption { display: none; }   /* the summary says what it is */
+  .picture-frame { max-height: 70vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
   .picture-frame img { display: block; max-width: 100%; height: auto; }
   .picture-frame.full img { max-width: none; }
   /* the picture is its own zoom toggle: a button, so a keyboard can use it too */
@@ -53,6 +67,57 @@
   .picture-zoom:hover:not(:disabled) { background: none; }
   .picture-frame.full .picture-zoom { width: max-content; cursor: zoom-out; }
   .picture-zoom:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+  /* the DFD check: what was fixed, what is left to look at, the DFD itself */
+  .dfd-check { margin: 14px 0 6px; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--surface); }
+  .dfd-head { display: flex; gap: 8px 12px; align-items: baseline; flex-wrap: wrap; }
+  .dfd-head h3 { font-size: 15px; margin: 0; }
+  .dfd-head .chips { font-variant-numeric: tabular-nums; }
+  .dfd-about { margin: 6px 0 0; max-width: 100ch; }
+  .dfd-summary { margin: 8px 0 0; font-size: 14px; max-width: 100ch; }
+  .dfd-block { margin-top: 12px; }
+  .dfd-block-head { display: flex; gap: 8px 12px; align-items: center; flex-wrap: wrap; margin: 0 0 6px; }
+  .dfd-block-head h4, .dfd-block > h4 { display: flex; gap: 8px; align-items: center; font-size: 14px; margin: 0; }
+  .dfd-block > h4 { margin: 0 0 6px; }
+  .dfd-block h4 .count { font-weight: 400; color: var(--muted); font-size: 13px; }
+  .dfd-block-head .dfd-acts { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+  .dfd-block-head button { font-size: 13px; padding: 3px 10px; font-weight: 400; }
+  .dfd-block > p { margin: 0 0 6px; font-size: 13.5px; }
+  .dfd-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .dfd-item { border-left: 3px solid var(--border); padding: 2px 0 2px 10px; font-size: 13.5px; }
+  .dfd-item.err { border-left-color: var(--err); }
+  .dfd-item.warn { border-left-color: var(--warn); }
+  .dfd-item.done { border-left-color: var(--ok); }
+  .dfd-item .t { margin: 0; }
+  .dfd-item .t strong { font-weight: 600; }
+  .dfd-item .f { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  .dfd-item ul { margin: 2px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+  .dfd-go { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+  .dfd-go button { font-size: 12.5px; padding: 2px 9px; border-radius: 999px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dfd-level { font-size: 12px; font-weight: 700; letter-spacing: .02em; }
+  .dfd-level.err { color: var(--err); }
+  .dfd-level.warn { color: var(--warn); }
+  .dfd-notes { margin-top: 10px; font-size: 13.5px; }
+  .dfd-notes summary { cursor: pointer; color: var(--muted); }
+  .dfd-notes ul { margin: 6px 0 0; padding-left: 20px; }
+  .dfd-preview { margin-top: 12px; }
+  .dfd-preview > summary { cursor: pointer; font-size: 14px; color: var(--muted); }
+  .dfd-compare { display: grid; gap: 12px; margin-top: 8px; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 900px) { .dfd-compare.two { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+  .dfd-fig { margin: 0; min-width: 0; }
+  .dfd-fig figcaption { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin-bottom: 4px; min-height: 26px; }
+  .dfd-fig figcaption button { font-size: 12.5px; padding: 2px 9px; }
+  .dfd-fig figcaption button[aria-pressed="true"] { background: var(--surface-2); border-color: var(--accent); box-shadow: inset 0 1px 2px rgba(0, 0, 0, .25); }
+  .dfd-frame { max-height: 70vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--dfd-paper); }
+  .dfd-frame svg { display: block; width: 100%; height: auto; }
+  .dfd-frame.full svg { max-width: none; }
+  .dfd-frame:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .dfd-empty { margin: 0; padding: 16px; font-size: 13.5px; color: var(--muted); }
+  .dfd-actions { margin-top: 12px; }
+  /* the row a finding's button went to, for a moment */
+  @keyframes dfd-flash { from { background: var(--surface-2); box-shadow: inset 0 0 0 2px var(--accent); } to { background: transparent; box-shadow: none; } }
+  tr.dfd-flash > td { animation: dfd-flash 1.8s ease-out; }
+  @media (prefers-reduced-motion: reduce) { tr.dfd-flash > td { animation: none; box-shadow: inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent); } }
 
   /* decomposition editor */
   .editor-head { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; margin-bottom: 12px; }
@@ -193,13 +258,48 @@
         authenticates and how far it is trusted. This decides the threats and their severity more than anything else
         — "Restricted — PII" and "Internal" produce very different registers.</p>
       <div id="sourceLine" class="note"></div>
+      <section id="dfdCheck" class="dfd-check" aria-labelledby="dfdTitle" hidden>
+        <div class="dfd-head">
+          <h3 id="dfdTitle">DFD check</h3>
+          <div id="dfdCounts" class="chips"></div>
+        </div>
+        <p class="note dfd-about">Following the DFD method, it puts each element in the trust zone its position is drawn in and
+          redraws the layout in CSA notation: always for a picture Claude read, and for any other diagram unless the redrawn layout
+          would have more problems with where things are drawn (overlaps, elements across a zone’s border) than the diagram has.
+          Then it checks that every element is joined by data flows and drawn in a trust zone. It never adds a data flow, or puts
+          an element in a zone, that the diagram doesn’t show.</p>
+        <p id="dfdSummary" class="dfd-summary"></p>
+        <p id="dfdSaid" class="vh" role="status" aria-live="polite"></p>
+        <div id="dfdFixes"></div>
+        <div id="dfdFindings"></div>
+        <div id="dfdNotes"></div>
+        <details id="dfdPreview" class="dfd-preview">
+          <summary>Preview of the DFD in CSA notation</summary>
+          <div id="dfdCompare" class="dfd-compare">
+            <figure id="pictureFig" class="dfd-fig" aria-labelledby="pictureCaption" hidden>
+              <figcaption><span id="pictureCaption">The picture you uploaded</span></figcaption>
+              <div class="picture-frame" id="pictureFrame"><button type="button" id="pictureZoom" class="picture-zoom" aria-pressed="false"
+                aria-label="Show the picture at full size" title="Show the picture at full size"><img id="pictureImg" alt=""></button></div>
+            </figure>
+            <figure class="dfd-fig" aria-labelledby="dfdCaption">
+              <figcaption><span id="dfdCaption">The DFD as checked</span>
+                <button type="button" id="dfdZoom" aria-pressed="false" aria-controls="dfdFrame" title="Show the DFD at full size">Full size</button></figcaption>
+              <div id="dfdFrame" class="dfd-frame" role="region" tabindex="0" aria-label="The DFD preview (it scrolls when shown at full size)"></div>
+            </figure>
+          </div>
+        </details>
+        <div class="row dfd-actions">
+          <button id="dfdDownload" type="button">Download as draw.io (CSA DFD)</button>
+          <button id="dfdContext" type="button">Download component context (JSON)</button>
+          <span id="dfdStatus" class="busy-line" role="status" aria-live="polite"></span>
+        </div>
+      </section>
+      <!-- a picture decomposed by hand: on its own, full width, beside nothing (the picture moves here from the preview) -->
       <details id="pictureBox" class="picture" open hidden>
         <summary>The picture you uploaded</summary>
-        <div class="picture-frame" id="pictureFrame"><button type="button" id="pictureZoom" class="picture-zoom" aria-pressed="false"
-          aria-label="Show the picture at full size" title="Show the picture at full size"><img id="pictureImg" alt=""></button></div>
+        <div id="pictureSlot"></div>
       </details>
       <div id="editor"></div>
-      <ul id="decompWarnings" class="warn-list" hidden></ul>
       <div id="editStatus" class="busy-line ed-status" role="status" aria-live="polite"></div>
     </li>
 
@@ -249,6 +349,7 @@
 <script src="js/tm-engine.js"></script>
 <script src="js/tm-register.js"></script>
 <script src="js/tm-dfd.js"></script>
+<script src="js/tm-dfdcheck.js"></script>
 <script src="js/threatmodel.js"></script>
 </body>
 </html>

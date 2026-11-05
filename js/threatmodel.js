@@ -2,6 +2,10 @@
  * threatmodel.js — the Threat Modelling tab: upload a diagram, check its decomposition (CSA §3.2), run
  * STRIDE-LM through the threat profile built on the Threat Profile tab (§3.3), and download the register and the DFD.
  *
+ * As soon as a decomposition is read, the DFD check (js/tm-dfdcheck.js, the architecture-to-drawio-dfd skill's method)
+ * puts each element in the zone its position is drawn in and redraws the layout in CSA notation, and lists what is
+ * left for the user to look at; it is checked again as the user edits.
+ *
  * Reads the Threat Profile tab's saved profile (localStorage threatsim.sim.v1) and the MITRE data in AttackDB.
  * Claude is used only when the server says it has an API key (api/tm/status) and the user asks for it: to
  * read a picture of a diagram, and to write the threat events in more detail. Everything else runs in this
@@ -54,6 +58,9 @@
     rev: 0,             // counts the changes the results depend on: the decomposition, its name, the profile
     undo: [],           // the decomposition before each of the last changes that can be undone, the latest last
     open: {},           // editor section -> open (remembered across re-renders)
+    // the DFD check: read, the decomposition as it was read, kept while its fixes can be undone; fixes, the fixes made
+    // to it then; result, the last check of the decomposition as it stands
+    dfd: { read: null, fixes: [], result: null },
   };
   // Where the source diagram put each zone and element: id -> { geometry, parent } or { geometry, zone }.
   let home = new Map();
@@ -89,6 +96,7 @@
    */
   function editNote(text, kind, ...extra) {
     clearTimeout(noteTimer);
+    if (text) quiet();   // what the edit did is said here: the DFD check's live region keeps still this turn
     const line = $('#editStatus');
     if (!extra.length && state.undo.length) {
       say(line, text, kind === 'ok' ? '' : kind, ...undoControls(`Undo puts back ${state.undo[state.undo.length - 1].what}.`));
@@ -325,7 +333,7 @@
     for (const b of ['#exampleBtn', '#scratchBtn', '#claudeReadBtn', '#handBtn', '#keepBtn']) $(b).disabled = on;
     $('#fileInput').disabled = on;
     $('#drop').classList.toggle('busy', on);
-    for (const b of document.querySelectorAll('#editor [data-idle]')) b.disabled = on;   // Load context, Clear
+    for (const b of document.querySelectorAll('#editor [data-idle], #dfdCheck [data-idle]')) b.disabled = on;   // Load context, Clear, the fixes
     updateRun();
   }
 
@@ -339,9 +347,16 @@
     else if (state.dataError) why = ['The MITRE data couldn’t be loaded in this browser, so the model can’t run. Reload the page, or pull the data again on the ', link('Data page'), '.'];
     else if (!state.loaded) why = 'Loading the MITRE data in this browser…';
     else if (!state.models['enterprise-attack']) why = ['The model needs MITRE ATT&CK Enterprise in this browser: ', link('pull it on the Data page'), ', then come back here.'];
+    // what the DFD check still lists never stops the run: said plainly
+    const r = m && state.dfd.result;
+    const left = r ? r.counts.errors + r.counts.warnings : 0;
+    const open = !why && left
+      ? `${listOf([r.counts.errors ? plural(r.counts.errors, 'error') : '', r.counts.warnings ? plural(r.counts.warnings, 'warning') : ''].filter(Boolean))} from the DFD check (step 3) `
+        + `${left === 1 ? 'is' : 'are'} still open. ${left === 1 ? 'It doesn’t' : 'They don’t'} stop the run: the threat model and its deliverables use the decomposition as it stands.`
+      : null;
     const hint = $('#runHint');
-    hint.replaceChildren(...[].concat(why || []));
-    hint.hidden = !why;
+    hint.replaceChildren(...[].concat(why || open || []));
+    hint.hidden = !(why || open);
   }
 
   /**
@@ -384,7 +399,7 @@
       } else if (await confirmReplace('file', file.name)) {
         clearImage();
         setModel(r.model);
-        say(status, readSummary(r.model), 'ok');
+        say(status, readSummary(state.model) + checkSaid(), 'ok');
       } else {
         say(status, `${file.name} wasn’t loaded: the decomposition you were working on is unchanged.${stillWaiting()}`);
       }
@@ -439,8 +454,12 @@
     const old = state.modelImage;
     if (old && (!image || old.url !== image.url) && !(state.image && state.image.url === old.url)) URL.revokeObjectURL(old.url);
     state.modelImage = image || null;
-    if (image) $('#pictureImg').src = image.url;
-    else $('#pictureImg').removeAttribute('src');
+    if (image) {
+      $('#pictureImg').src = image.url;
+      // a picture just read: shown, and (Claude's reading) compared in the preview, whatever was chosen for the last one
+      $('#pictureBox').open = true;
+      delete state.open.preview;
+    } else $('#pictureImg').removeAttribute('src');
     $('#pictureFrame').classList.remove('full');
     $('#pictureZoom').setAttribute('aria-pressed', 'false');
   }
@@ -471,7 +490,7 @@
       const model = await TMParse.parseDrawio(await res.text(), 'sovereign-ai-architecture.drawio');
       clearImage();
       setModel(model);
-      say(status, readSummary(model) + ' This is the Sovereign AI reference architecture re-modelled as a draw.io DFD, with the component context filled in.', 'ok');
+      say(status, readSummary(model) + ' This is the Sovereign AI reference architecture re-modelled as a draw.io DFD, with the component context filled in.' + checkSaid(), 'ok');
     } catch (e) {
       say(status, `${e.message}${stillWaiting()}`, 'err');
     } finally {
@@ -594,7 +613,7 @@
         release(j, out);
         read = true;
         say(status, readSummary(model) + ' Claude read these from the picture: check every element, flow and zone below before you run the model.'
-          + (resume ? ' (The picture isn’t kept when you leave the page.)' : ''), 'ok');
+          + (resume ? ' (The picture isn’t kept when you leave the page.)' : '') + checkSaid(), 'ok');
       } else {
         release(j, out);
         // a read picked up after leaving the page has no picture here any more (it isn't kept): say how to go on
@@ -667,9 +686,12 @@
     state.marks = { events: new Map(), sequences: new Map() };
     state.stale = false;
     state.undo = [];
+    state.dfd = { read: null, fixes: [], result: null };
     state.rev++;
     home = new Map();
     setModelImage(null);
+    $('#dfdCheck').hidden = true;
+    say($('#dfdStatus'), '');
     $('#keepBtn').hidden = true;
     $('#stepDecomp').hidden = true;
     if (!state.running) $('#stepRun').hidden = true;
@@ -692,8 +714,24 @@
    * Show a decomposition. A new one gets an id of its own (and the run kept for the one it replaces goes); one
    * taken up again, restored or saved by another tab, keeps its id (gen). write false: it is kept as it is already.
    * show false: steps 3 and 4 stay as they are (a picture waiting to be read keeps them out of the way).
+   * dfd: the DFD check's state kept with it (restored, or another tab's); without one the decomposition has just been
+   * read, so the check runs on it and makes its fixes, which can be undone.
    */
-  function setModel(model, { image = null, savedHome = null, gen = '', write = true, show = true } = {}) {
+  function setModel(model, { image = null, savedHome = null, gen = '', write = true, show = true, dfd } = {}) {
+    if (dfd === undefined) {
+      const r = fixed(model);
+      if (r.fixes.length) {
+        model = r.model;
+        savedHome = null;   // where the fixed decomposition puts things
+        write = true;
+      } else if (r.changed) {   // tidied without a fix to undo (the ★ of an element marked as a crown jewel already)
+        model = r.model;
+        write = true;
+      }
+      state.dfd = { read: r.fixes.length ? clone(r.read) : null, fixes: r.fixes, result: null };
+    } else {
+      state.dfd = Object.assign(dfdOf(dfd), { result: null });
+    }
     state.model = model;
     if (!gen) dropRun();
     state.gen = gen || newGen();
@@ -706,6 +744,7 @@
     setModelImage(image);
     clearResults();
     say($('#editStatus'), '');
+    say($('#dfdStatus'), '');
     if (write) persist();
     if (show) {
       $('#stepDecomp').hidden = false;
@@ -731,7 +770,8 @@
     const last = n => (Number.isInteger(n) && n > 0 ? n : 0);
     const rev = Math.max(state.saved.gen === state.gen ? last(state.saved.rev) : 0,
       kept && kept.user === USER && kept.gen === state.gen ? last(kept.rev) : 0) + 1;
-    if (!store.set(TM_KEY, { user: USER, gen: state.gen, rev, model: state.model, home: [...home] })) {
+    const dfd = { read: state.dfd.read, fixes: state.dfd.read ? state.dfd.fixes : [] };
+    if (!store.set(TM_KEY, { user: USER, gen: state.gen, rev, model: state.model, home: [...home], dfd })) {
       editNote('This browser won’t keep the decomposition between visits (storage is full or blocked). Save it as a file.', 'err');
       return;
     }
@@ -774,7 +814,7 @@
     clearTimeout(saveTimer);
     saveTimer = 0;
     if (replaced) {
-      setModel(model, { savedHome: rec.home, gen, write: false, show: !state.image && !state.busy });
+      setModel(model, { savedHome: rec.home, gen, write: false, show: !state.image && !state.busy, dfd: rec.dfd || null });
       state.saved = { gen, rev };
       if (!diagramBusy()) {
         say($('#diagramStatus'), state.image ? `The decomposition was replaced in another tab of this page.${stillWaiting()}`
@@ -784,6 +824,7 @@
     }
     state.saved = { gen: gen || state.gen, rev };
     state.model = model;
+    state.dfd = Object.assign(dfdOf(rec.dfd), { result: null });
     setHome(model, rec.home);
     dropUndo();
     state.rev++;
@@ -808,7 +849,7 @@
     state.rev++;
     if (!keepUndo) dropUndo();
     persist();
-    if (soon) scheduleWarnings(); else renderWarnings();
+    if (soon) scheduleCheck(); else renderCheck();
     markStale();
   }
 
@@ -840,7 +881,8 @@
   /**
    * The DFD keeps the diagram's own layout while every element is where the diagram drew it. An element moved
    * to another zone, or in a zone moved into another, loses its position (so the DFD is laid out
-   * automatically) until it is back; the rest of the layout is kept meanwhile.
+   * automatically) until it is back, or in the zone its position is drawn in (where the DFD check would put it);
+   * the rest of the layout is kept meanwhile.
    */
   function applyLayout() {
     const m = state.model;
@@ -859,9 +901,19 @@
       const h = home.get(z.id);
       if (h) z.geometry = zoneInPlace(z.id) ? box(h.geometry) : null;
     }
+    // the innermost zone in place whose box holds a point
+    const sized = m.zones.filter(z => z.geometry).sort((a, b) => a.geometry.w * a.geometry.h - b.geometry.w * b.geometry.h);
+    const drawnIn = g => {
+      if (!g) return undefined;
+      const c = { x: g.x + g.w / 2, y: g.y + g.h / 2 };
+      const z = sized.find(o => c.x >= o.geometry.x && c.x <= o.geometry.x + o.geometry.w && c.y >= o.geometry.y && c.y <= o.geometry.y + o.geometry.h);
+      return z ? z.id : null;
+    };
     for (const e of m.elements) {
       const h = home.get(e.id);
-      if (h) e.geometry = (e.zone || null) === (h.zone || null) && zoneInPlace(e.zone) ? box(h.geometry) : null;
+      if (!h) continue;
+      const zone = e.zone || null;
+      e.geometry = zoneInPlace(e.zone) && (zone === (h.zone || null) || zone === drawnIn(h.geometry)) ? box(h.geometry) : null;
     }
   }
 
@@ -876,14 +928,60 @@
     const loose = m.elements.filter(e => !e.geometry);
     const drawn = m.elements.some(e => e.geometry || (home.get(e.id) || {}).geometry);
     let layout = '';
-    if (m.elements.length && !loose.length) layout = ' In the DFD, the diagram keeps the source layout.';
-    else if (m.elements.length && !drawn) layout = ' In the DFD, the diagram is laid out automatically.';
+    if (m.elements.length && !loose.length) {
+      layout = redrawn() ? ' The data-flow diagram (.pptx) keeps the arrangement the DFD check below redrew in CSA notation.'
+        : ' The data-flow diagram (.pptx) keeps the source layout.';
+    }
+    else if (m.elements.length && !drawn) layout = ' The data-flow diagram (.pptx) is laid out automatically.';
     else if (m.elements.length) {
-      layout = ` In the DFD, the diagram is laid out automatically, because ${namesOf(loose)} ${loose.length === 1 ? 'has' : 'have'} no place in the`
-        + ` source layout (added, or moved to another zone). Remove what you added and put back what you moved to keep the source layout.`;
+      const one = loose.length === 1;
+      const zoneById = new Map(m.zones.map(z => [z.id, z]));
+      // the zone whose move took an element's place: the outermost zone round it with no position (null: its zone has one)
+      const movedZone = e => {
+        let top = null;
+        for (let z = zoneById.get(e.zone), seen = new Set(); z && !seen.has(z.id) && !z.geometry; z = zoneById.get(z.parent)) { seen.add(z.id); top = z; }
+        return top;
+      };
+      const loneZone = z => !(z.parent && zoneById.has(z.parent));
+      // why each has no place (added; given none by the diagram; moved out of its zone, or to another; in a zone moved
+      // into another, or taken out of the zone it sat in), and where the preview puts it: in its zone, with its zone,
+      // or, outside every zone, below the diagram
+      const reasonOf = e => {
+        const h = home.get(e.id);
+        if (!h) return 'added';
+        if (!h.geometry) return 'none';
+        if ((e.zone || null) !== (h.zone || null)) return e.zone ? 'moved' : 'out';
+        const z = movedZone(e);
+        return !z ? 'moved' : loneZone(z) ? 'zone-out' : 'zone-in';
+      };
+      const whereOf = e => {
+        if (!e.zone || !zoneById.has(e.zone)) return 'below';
+        const z = movedZone(e);
+        return !z ? 'room' : loneZone(z) ? 'with-below' : 'with-inside';
+      };
+      const count = (list, f) => list.reduce((n, e) => n.set(f(e), (n.get(f(e)) || 0) + 1), new Map());
+      const why = count(loose, reasonOf), at = count(loose, whereOf);
+      const zonesOf = r => new Set(loose.filter(e => reasonOf(e) === r).map(e => movedZone(e).id)).size;
+      const zonesAt = k => new Set(loose.filter(e => whereOf(e) === k).map(e => movedZone(e).id)).size;
+      const reasons = [why.has('added') ? 'added' : '', why.has('none') ? 'given no position by the diagram' : '',
+        why.has('out') ? `moved out of ${why.get('out') === 1 ? 'its zone' : 'their zones'}` : '', why.has('moved') ? 'moved to another zone' : '',
+        why.has('zone-in') ? `in ${zonesOf('zone-in') === 1 ? 'a zone' : 'zones'} moved into another` : '',
+        why.has('zone-out') ? `in ${zonesOf('zone-out') === 1 ? 'a zone taken out of the zone it sat in' : 'zones taken out of the zones they sat in'}` : ''].filter(Boolean);
+      const kinds = [...at.keys()];
+      const where = kinds.length > 1
+        ? `each ${['room', 'with-inside', 'with-below', 'below'].filter(k => at.has(k)).map(k => ({ room: 'where there is room in its zone (making room if a zone is full)',
+          'with-inside': 'with its zone, inside the zone it was moved into', 'with-below': 'with its zone, below the diagram', below: 'below the diagram if it is in none' })[k]).join(', or ')},`
+        : kinds[0] === 'room' ? `${one ? 'it' : 'them'} where there is room in ${one ? 'its zone (making room if the zone is full)' : 'their zones (making room if a zone is full)'}`
+          : kinds[0] === 'with-inside' ? `${one ? 'it' : 'them'} with ${one ? 'its zone' : zonesAt('with-inside') > 1 ? 'their zones' : 'their zone'}, inside the ${zonesAt('with-inside') > 1 ? 'zones they were' : 'zone it was'} moved into,`
+            : kinds[0] === 'with-below' ? `${one ? 'it' : 'them'} with ${one ? 'its zone' : zonesAt('with-below') > 1 ? 'their zones' : 'their zone'}, below the diagram,`
+              : `${one ? 'it' : 'them'} below the diagram, outside every zone,`;
+      const added = why.has('added'), moved = ['out', 'moved', 'zone-in', 'zone-out'].some(r => why.has(r));
+      const back = added || moved ? ` ${added ? `Remove what you added${moved ? ' and put back what you moved' : ''}` : 'Put back what you moved'} to keep the source layout.` : '';
+      layout = ` The data-flow diagram (.pptx) is laid out automatically, because ${namesOf(loose)} ${one ? 'has' : 'have'} no place in the`
+        + ` source layout (${reasons.length > 1 ? `${reasons.slice(0, -1).join(', ')}, or ${reasons[reasons.length - 1]}` : reasons[0]}); the preview below puts ${where}`
+        + ` and keeps everything else in its own zone.${back}`;
     }
     $('#sourceLine').textContent = `${how.trim()}.${layout}`;
-    $('#pictureBox').hidden = !(state.modelImage && m.source.kind === 'image');
   }
 
   const nameOf = e => String(e.label || '').trim() || 'Unnamed element';
@@ -973,7 +1071,7 @@
       reveal(target);
     }
     renderSource();
-    renderWarnings();
+    renderCheck();
   }
 
   /** Scroll a control into view when it is off-screen, or behind the status bar at the foot of the window. */
@@ -987,7 +1085,7 @@
   /** An editor section: a <details> whose summary carries the count, open by default when short. */
   function section(key, title, count, ...body) {
     const open = key in state.open ? state.open[key] : key === 'elements' || count <= 12;
-    const d = el('details', { class: 'ed-section', open },
+    const d = el('details', { class: 'ed-section', open, 'data-section': key },
       el('summary', {}, el('h3', {}, title, el('span', { class: 'count', text: String(count) }))), ...body);
     d.addEventListener('toggle', () => { state.open[key] = d.open; });
     return d;
@@ -1240,44 +1338,494 @@
     }
   }
 
-  // ---- warnings
+  // ---- the DFD check (js/tm-dfdcheck.js): the fixes it made, and what is left to look at
 
-  // finish()'s checks for a model with no elements, no flows or no zones speak of the diagram; the editor's say what to add.
-  let editorWords = null;
-  function editorWording() {
-    if (editorWords) return editorWords;
-    editorWords = new Map();
+  /** A decomposition just read, checked and fixed: { model, fixes, read, changed }. Should the check fail, it stays as read. */
+  function fixed(model) {
     try {
-      const [none] = TMParse.finish({}).warnings;
-      if (none) editorWords.set(none, 'Add the elements of the system: external entities, processes and data stores.');
-      for (const w of TMParse.finish({ elements: [{ id: 'e', label: 'e' }] }).warnings) {
-        if (/zone|boundar/i.test(w)) editorWords.set(w, 'No trust zones: without trust boundaries, the threats that cross zones — the ones that matter most — can’t be told apart.');
-        else if (/flow/i.test(w)) editorWords.set(w, 'No data flows yet: CSA §3.2 needs the connections between elements.');
-      }
-    } catch (_) { /* keep finish()'s own words */ }
-    return editorWords;
+      const r = DfdCheck.check(model, { fix: true });
+      return { model: r.model, fixes: r.fixes, read: model, changed: r.changed };
+    } catch (e) {
+      console.error(e);
+      return { model, fixes: [], read: model, changed: false };
+    }
   }
 
-  let warnTimer = 0;
-  const scheduleWarnings = () => { clearTimeout(warnTimer); warnTimer = setTimeout(renderWarnings, 150); };
+  /** The DFD check's state as it was kept with a decomposition (in this browser, or by another tab): what can be used of it. */
+  function dfdOf(d) {
+    const ok = d && typeof d === 'object' && d.read && typeof d.read === 'object' && Array.isArray(d.read.elements) && Array.isArray(d.read.zones);
+    const fixes = ok && Array.isArray(d.fixes) ? d.fixes.filter(f => f && typeof f === 'object' && typeof f.code === 'string' && typeof f.text === 'string') : [];
+    return { read: fixes.length ? d.read : null, fixes };
+  }
 
-  /** The decomposition's warnings: what the run will say about it (finish()'s notes and CSA §3.2 checks), and the editor's own. */
-  function renderWarnings() {
-    clearTimeout(warnTimer);
+  // the fixes that redraw the layout: while they stand, the advice on what is left speaks of the layout the check drew
+  const LAYOUT_FIXES = new Set(DfdCheck.LAYOUT);
+  const redrawn = () => state.dfd.fixes.some(f => LAYOUT_FIXES.has(f.code));
+
+  /** What the DFD check did with the decomposition just read, said after the line that says it was read. */
+  function checkSaid() {
+    const r = state.dfd.result;
+    if (!r) return '';
+    const n = state.dfd.fixes.length, left = r.counts.errors + r.counts.warnings;
+    return ` The DFD check ${n ? `fixed ${plural(n, 'thing')}` : 'had nothing to fix'} and ${left ? `lists ${plural(left, 'thing')} to look at` : 'found nothing to look at'} (step 3).`;
+  }
+
+  let checkTimer = 0;
+  const scheduleCheck = () => { clearTimeout(checkTimer); checkTimer = setTimeout(() => renderCheck(), 250); };
+
+  // The panel's live region says what is left when that changes as the decomposition is edited: at the end of the turn,
+  // and only if the editor's status bar doesn't speak in it (that says what the edit did; one voice is enough).
+  let saidTimer = 0, editTurn = false;
+  function announce(text) {
+    clearTimeout(saidTimer);
+    if (!editTurn) saidTimer = setTimeout(() => { $('#dfdSaid').textContent = text; }, 0);
+  }
+  function quiet() {
+    clearTimeout(saidTimer);
+    $('#dfdSaid').textContent = '';   // (so the same words, said later, are heard again)
+    if (!editTurn) { editTurn = true; setTimeout(() => { editTurn = false; }, 0); }
+  }
+  const leftSaid = c => (c.errors + c.warnings
+    ? `DFD check: ${andJoin([c.errors ? plural(c.errors, 'error') : '', c.warnings ? plural(c.warnings, 'warning') : ''])} left to look at.`
+    : 'DFD check: nothing is left to look at.');
+
+  // what several findings of a kind say together, and the control in the editor their buttons go to
+  const N = n => n.toLocaleString('en');
+  const GROUP = {
+    'zone-mismatch': n => `${N(n)} elements are in a trust zone other than the one the diagram draws them in`,
+    'outside-own-zone': n => `${N(n)} elements are drawn outside their trust zone`,
+    'inside-other-zone': n => `${N(n)} elements are drawn inside a trust zone they aren’t assigned to`,
+    overlap: n => `${N(n)} pairs of elements overlap`,
+    isolated: n => `${N(n)} elements have no data flow`,
+    'no-zone': n => `${N(n)} elements are outside every trust zone`,
+    'empty-zone': n => `${N(n)} trust zones hold nothing`,
+    'unlabelled-flow': n => `${N(n)} data flows have no label`,
+    'no-context': n => `${N(n)} elements have no context`,
+    unnamed: n => `${N(n)} elements have no name in the diagram`,
+    'unnamed-zone': n => `${N(n)} trust zones have no name`,
+    'duplicate-name': n => `${N(n)} names are each used by more than one element`,
+    straddles: n => `${N(n)} elements straddle the border of a trust zone`,
+    'sticks-out': n => `${N(n)} elements stick out of their trust zone`,
+    'zones-overlap': n => `${N(n)} pairs of trust zones overlap`,
+    'no-name': n => `${N(n)} elements have no name`,
+  };
+  // the findings whose own words say more than the names on their buttons: listed one by one under the group
+  const DETAIL = new Set(['zone-mismatch', 'outside-own-zone', 'inside-other-zone', 'overlap', 'duplicate-name', 'straddles', 'sticks-out',
+    'zones-overlap', 'duplicate-id', 'unknown-parent', 'unknown-zone', 'bad-type', 'flow-end', 'flow-loop']);
+  const FIELD = { 'zone-mismatch': 'zone', 'outside-own-zone': 'zone', 'inside-other-zone': 'zone', straddles: 'zone', 'sticks-out': 'zone',
+    'no-zone': 'zone', 'unknown-zone': 'zone', 'bad-type': 'type', 'no-context': 'purpose', 'unknown-parent': 'parent', 'zones-overlap': 'parent',
+    'flow-end': 'source', 'flow-loop': 'target' };
+  const ADD = { 'no-elements': 'add:element', 'no-flows': 'add:flow', 'no-zones': 'add:zone' };
+  const andJoin = a => listOf(a.filter(Boolean));
+  const weight = list => list.reduce((n, f) => n + (f.count || 1), 0);   // a finding may stand for several (overlaps counted together)
+
+  /** Check the decomposition as it stands (its fixes are made once, when it is read) and show what the check finds. */
+  function renderCheck(focusKey) {
+    clearTimeout(checkTimer);
+    const m = state.model;
+    const panel = $('#dfdCheck');
+    if (!m) { panel.hidden = true; return; }
+    const active = document.activeElement;
+    const key = focusKey || (active && panel.contains(active) && active.dataset.key) || '';
+    let r = null;
+    try { r = DfdCheck.check(m, { fix: false, redrawn: redrawn() }); } catch (e) { console.error(e); }
+    state.dfd.result = r;
+    panel.hidden = false;
+    if (!r) {
+      $('#dfdCounts').replaceChildren();
+      $('#dfdSummary').textContent = 'The DFD check couldn’t run on this decomposition. The threat model can still be run.';
+      for (const id of ['#dfdFixes', '#dfdFindings', '#dfdNotes']) $(id).replaceChildren();
+      updateRun();
+      return;
+    }
+    const c = r.counts;
+    $('#dfdCounts').replaceChildren(...[plural(c.zones, 'trust zone'), plural(c.elements, 'element'), plural(c.flows, 'data flow'),
+      c.flows ? `${c.crossing} ${c.crossing === 1 ? 'crosses' : 'cross'} a trust boundary` : '']
+      .filter(Boolean).map(t => el('span', { class: 'chip', text: t })));
+    const summary = summaryOf(m, r);
+    if ($('#dfdSummary').textContent !== summary) $('#dfdSummary').textContent = summary;
+    // heard when what is left changes as the decomposition is edited, and only that; not when one has just been read
+    // (or put back): the status line that says so has said what the check did, so it isn't said twice
+    const left = `${c.errors} ${c.warnings}`;
+    if (!state.dfd.seen) { clearTimeout(saidTimer); $('#dfdSaid').textContent = ''; }
+    else if (state.dfd.left !== left) announce(leftSaid(c));
+    state.dfd.left = left;
+    state.dfd.seen = true;
+    $('#dfdFixes').replaceChildren(...fixesBlock());
+    $('#dfdFindings').replaceChildren(...findingsBlock(r));
+    $('#dfdNotes').replaceChildren(...notesBlock(r.notes));
+    renderPreview();
+    const target = key && panel.querySelector(`[data-key="${CSS.escape(key)}"]`);
+    if (target) target.focus({ preventScroll: true });
+    updateRun();
+  }
+
+  /** What is left to look at, in a sentence that claims only what the checks that ran can tell. */
+  function summaryOf(m, r) {
+    const c = r.counts, n = state.dfd.fixes.length, left = c.errors + c.warnings;
+    // (made when the decomposition was read, or since, by Apply the fixes or Redraw anyway: said the same way)
+    const made = n ? `The DFD check made ${plural(n, 'fix', 'fixes')} (below). ` : '';
+    if (left) {
+      const what = andJoin([c.errors ? plural(c.errors, 'error') : '', c.warnings ? plural(c.warnings, 'warning') : '']);
+      // the run needs an element; past that, nothing the check lists stops it
+      const run = !m.elements.length ? 'Add at least one element to run the model.'
+        : `${left === 1 ? 'It doesn’t' : 'None of them'} stop${left === 1 ? '' : 's'} the threat model from running: it uses the decomposition as it stands.`;
+      return `${made}Left to look at: ${what}. ${run}`;
+    }
+    // nothing left: there are elements, data flows and zones (or a warning would say so), each element has a flow, and
+    // each but an external entity is in a zone (one outside them is usual, so it isn't a warning)
+    const outside = m.elements.filter(e => !e.zone && e.type === 'entity');
+    const zones = outside.length
+      ? `, and all but the external ${outside.length === 1 ? 'entity' : 'entities'} ${namesOf(outside)} sit in a trust zone (external entities are usually outside them)`
+      : ' and sits in a trust zone';
+    return `${made}Nothing is left to look at: every element is joined by a data flow${zones}.`;
+  }
+
+  /** "a; b and c", or the first three and how many more: what the fixes would do, said after "Applying the fixes would". */
+  function wouldList(fixes) {
+    const say = fixes.map(f => f.would || f.text.replace(/\.$/, ''));
+    if (say.length > 3) return `${say.slice(0, 3).join('; ')}; and make ${plural(say.length - 3, 'more change')}`;
+    return say.length > 1 ? `${say.slice(0, -1).join('; ')} and ${say[say.length - 1]}` : say.join('');
+  }
+
+  /**
+   * The fixes the check made (when the decomposition was read, or since, on asking), with Undo; when none stand, the ones
+   * it would make, with Apply; and the redraw of the layout it held back (it would add geometry problems in all), with a
+   * button to make it anyway.
+   */
+  function fixesBlock() {
+    const d = state.dfd, out = [];
+    const head = (title, count, buttons) => el('div', { class: 'dfd-block-head' },
+      el('h4', {}, title, el('span', { class: 'count', text: String(count) })), buttons.length ? el('div', { class: 'dfd-acts' }, buttons) : null);
+    const button = (key, text, fn, extra) => el('button', Object.assign({ type: 'button', 'data-key': key, 'data-idle': '', disabled: state.busy, text, on: once(fn) }, extra || {}));
+    if (d.fixes.length) {
+      out.push(el('div', { class: 'dfd-block' },
+        head('Fixes made by the DFD check', d.fixes.length, [button('dfd:undo', 'Undo the fixes', undoFixes, { 'aria-describedby': 'dfdUndoNote' })]),
+        el('ul', { class: 'dfd-list' }, d.fixes.map(f => el('li', { class: 'dfd-item done' }, el('p', { class: 't', text: f.text })))),
+        el('p', { class: 'note', id: 'dfdUndoNote', text: 'Undo puts back the zones and the layout as the diagram had them; your other edits stay.' })));
+    }
+    const w = wouldFix();
+    const can = d.fixes.length ? [] : w.fixes;
+    const held = redrawn() ? null : w.held;   // (once a redraw stands, Undo is the way back)
+    if (!can.length && !held) return out;
+    const buttons = [], lines = [];
+    if (can.length) {
+      buttons.push(button('dfd:apply', 'Apply the fixes', () => applyFixes(false)));
+      lines.push(el('p', { text: `The zones and the layout are as the diagram has them. Applying the fixes would ${wouldList(can)}.` }));
+    }
+    if (held) {
+      buttons.push(button('dfd:redraw', `Redraw in CSA notation anyway (${held.short})`, () => applyFixes(true), { 'aria-describedby': 'dfdHeldNote' }));
+      lines.push(el('p', { id: 'dfdHeldNote', text: `The check kept the diagram’s own layout. ${held.text}` }));
+    }
+    out.push(el('div', { class: 'dfd-block' }, head('Not fixed', can.length + (held ? 1 : 0), buttons), ...lines));
+    return out;
+  }
+
+  /**
+   * What the check would do with the decomposition as it stands: its fixes, and a redraw of the layout it would hold back.
+   * The dry run (the layout, redrawn and weighed) is made again only when what it rests on changes: the page, the ids,
+   * where the zones and elements are drawn, the zone each is in, the types, whether each has a name, and the flows'
+   * ends (a structural error stops the fixes). Names never move the layout: the dry run has a token for each, put back
+   * as the names stand; and the ★ a label may end with is worked out on its own, from the labels (no layout needed).
+   */
+  let would = { key: '', fixes: [], held: null };
+  const STAR = /\s*★\s*$/u;
+  const named = x => !!String(x.label || '').trim();
+  const token = (kind, i) => `⟦${kind}${i}⟧`;   // ⟦e12⟧: no name holds it
+  function wouldFix() {
+    const m = state.model;
+    const key = JSON.stringify([m.page, m.source && m.source.method, m.zones.map(z => [z.id, z.parent, z.geometry, named(z)]),
+      m.elements.map(e => [e.id, e.type, e.zone, e.geometry, named(e)]), m.flows.map(f => [f.id, f.source, f.target])]);
+    if (key !== would.key) {
+      const dry = clone(m);
+      dry.zones.forEach((z, i) => { if (named(z)) z.label = token('z', i); });
+      dry.elements.forEach((e, i) => { if (named(e)) e.label = token('e', i); });
+      let r = null;
+      try { r = DfdCheck.check(dry, { fix: true }); } catch (_) { /* nothing to offer */ }
+      would = { key, fixes: r ? r.fixes : [], held: r ? r.held : null };
+    }
+    // the names as the check says them: an element's without the ★ it reads as the crown-jewel mark
+    const names = new Map();
+    m.zones.forEach((z, i) => names.set(token('z', i), String(z.label || '').trim()));
+    m.elements.forEach((e, i) => {
+      const label = String(e.label || ''), bare = label.replace(STAR, '');
+      names.set(token('e', i), (e.crownJewel !== false && STAR.test(label) && bare.trim() ? bare : label).trim());
+    });
+    const put = s => (typeof s === 'string' ? s.replace(/⟦[ez]\d+⟧/g, t => (names.has(t) ? names.get(t) : t)) : s);
+    const starred = m.elements.filter(e => STAR.test(String(e.label || '')));
+    let stars = [];
+    if (starred.length) {
+      try {
+        stars = DfdCheck.check({ zones: [], flows: [], elements: starred.map(e => ({ id: e.id, label: e.label, type: e.type, crownJewel: e.crownJewel, context: {} })) },
+          { fix: true }).fixes.filter(f => f.code === 'star');
+      } catch (_) { /* nothing to offer */ }
+    }
+    return { fixes: stars.concat(would.fixes.map(f => Object.assign({}, f, { text: put(f.text), would: put(f.would) }))), held: would.held };
+  }
+
+  /** The findings, errors first, each kind with what to do and buttons to the rows they are about. */
+  function findingsBlock(r) {
+    const m = state.model;
+    const index = { elements: new Map(m.elements.map(e => [e.id, e])), zones: new Map(m.zones.map(z => [z.id, z])), flows: new Map(m.flows.map(f => [f.id, f])) };
+    const out = [];
+    for (const [level, title] of [['error', 'Errors'], ['warning', 'Warnings']]) {
+      const list = r.findings.filter(f => f.level === level);
+      if (!list.length) continue;
+      const groups = new Map();
+      for (const f of list) {
+        const k = `${f.code}\n${f.fixAll || f.fix}`;   // one kind, said with one fix
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(f);
+      }
+      out.push(el('div', { class: 'dfd-block' },
+        el('h4', {}, el('span', { class: `dfd-level ${level === 'error' ? 'err' : 'warn'}`, text: title }), el('span', { class: 'count', text: N(weight(list)) })),
+        el('ul', { class: 'dfd-list' }, [...groups.values()].map(fs => findingItem(fs, level, index)))));
+    }
+    return out;
+  }
+
+  function findingItem(fs, level, index) {
+    const f0 = fs[0], code = f0.code, n = weight(fs);
+    const cls = `dfd-item ${level === 'error' ? 'err' : 'warn'}`;
+    const go = goButtons(fs, index);
+    if (n === 1) return el('li', { class: cls }, el('p', { class: 't', text: f0.text }), el('p', { class: 'f', text: f0.fix }), go);
+    const head = GROUP[code] ? GROUP[code](n) : `${N(n)} like this: ${f0.text}`;
+    const listed = fs.filter(f => !f.count).slice(0, 8);
+    const detail = DETAIL.has(code) ? el('ul', {}, listed.map(f => el('li', { text: f.text })),
+      n > listed.length ? el('li', { text: `and ${N(n - listed.length)} more` }) : null) : null;
+    return el('li', { class: cls }, el('p', { class: 't' }, el('strong', { text: head }), '.'), detail, el('p', { class: 'f', text: f0.fixAll || f0.fix }), go);
+  }
+
+  /**
+   * Buttons that go to the editor row (and control) each finding is about: its elements, else its zones, else its flows.
+   * Twelve show, twelve more on asking; past those, how many more there are is said.
+   */
+  function goButtons(fs, index) {
+    const m = state.model;
+    const targets = [], seen = new Set();
+    let past = 0;
+    const add = (k, label) => {
+      if (seen.has(k)) return;
+      seen.add(k);
+      if (targets.length < 24) targets.push([k, label]); else past++;
+    };
+    for (const f of fs) {
+      const field = FIELD[f.code];
+      // a data flow needs two elements (the editor's Add a data flow waits for them): with one, the button adds the second
+      const to = f.code === 'no-flows' && m.elements.length < 2 ? 'add:element' : ADD[f.code];
+      if (to) add(to, { 'add:element': 'Add an element', 'add:flow': 'Add a data flow', 'add:zone': 'Add a zone' }[to]);
+      else if (f.code === 'no-crown-jewel') { if (m.elements.length) add(`e:${m.elements[0].id}:crown`, 'Mark the crown jewels'); }
+      else if (f.refs.elements.length) {
+        for (const id of f.refs.elements) {
+          const e = index.elements.get(id);
+          if (e) add(`e:${id}:${field || 'label'}`, nameOf(e));
+        }
+      } else if (f.refs.zones.length) {
+        for (const id of f.refs.zones) {
+          const z = index.zones.get(id);
+          if (z) add(`z:${id}:${field === 'parent' ? 'parent' : 'label'}`, zoneLabel(z));
+        }
+      } else {
+        for (const id of f.refs.flows) {
+          const fl = index.flows.get(id);
+          if (fl) { const w = flowWords(fl); add(`f:${id}:${field || 'label'}`, `${w.from} to ${w.to}`.replace(/"/g, '')); }
+        }
+      }
+    }
+    if (!targets.length) return null;
+    const button = ([k, label]) => {
+      const action = k.startsWith('add:') || /crown$/.test(k);
+      const short = Array.from(label).length > 40 ? Array.from(label).slice(0, 39).join('') + '…' : label;
+      return el('button', { type: 'button', 'data-key': `go:${k}`, text: action ? label : short,
+        title: action ? label : `Go to ${label} in the editor`, 'aria-label': action ? `${label}: go to it in the editor` : `Go to ${label} in the editor`,
+        on: { click: () => goTo(k) } });
+    };
+    const box = el('div', { class: 'dfd-go' }, targets.slice(0, 12).map(button));
+    const rest = past ? el('span', { class: 'note', text: `and ${N(past)} more` }) : null;
+    if (targets.length > 12) {
+      const more = el('button', { type: 'button', text: `Show ${targets.length - 12} more`, 'data-key': `more:${targets[0][0]}`,
+        on: { click: () => { const shown = targets.slice(12).map(button); more.replaceWith(...shown); shown[0].focus(); } } });
+      box.append(more);
+    }
+    if (rest) box.append(rest);
+    return box;
+  }
+
+  /** Open the editor's section, go to the control a finding is about, and mark its row for a moment. */
+  function goTo(key) {
+    const [kind, id] = key.split(':');
+    const section = kind === 'add' ? `${id}s` : { e: 'elements', z: 'zones', f: 'flows' }[kind];
+    const d = $(`#editor details[data-section="${section}"]`);
+    if (d && !d.open) { d.open = true; state.open[section] = true; }
+    const n = $(`#editor [data-key="${CSS.escape(key)}"]`);
+    if (!n) return;
+    n.focus({ preventScroll: true });
+    n.scrollIntoView({ block: 'center' });
+    const tr = n.closest('tr');
+    if (tr) {
+      tr.classList.remove('dfd-flash');
+      void tr.offsetWidth;   // so the mark shows again on a second visit
+      tr.classList.add('dfd-flash');
+      setTimeout(() => tr.classList.remove('dfd-flash'), 2000);
+    }
+  }
+
+  function notesBlock(notes) {
+    if (!notes.length) return [];
+    const d = el('details', { class: 'dfd-notes', open: state.open.notes !== false },
+      el('summary', {}, `Notes from reading the diagram (${notes.length})`), el('ul', {}, notes.map(t => el('li', { text: t }))));
+    d.addEventListener('toggle', () => { state.open.notes = d.open; });
+    return [d];
+  }
+
+  /**
+   * The preview, and the picture the decomposition was made from. Claude's reading is compared with its picture side by
+   * side (the skill's last step), the preview open by default. A picture decomposed by hand, or one with nothing drawn
+   * from it yet, stands on its own above the editor, full width, whatever the preview does.
+   */
+  function renderPreview() {
+    const m = state.model;
+    const d = $('#dfdPreview');
+    const picture = !!(state.modelImage && m && m.source.kind === 'image');
+    const beside = picture && m.source.method === 'claude' && (m.elements.length > 0 || m.zones.length > 0);
+    const fig = $('#pictureFig'), slot = beside ? $('#dfdCompare') : $('#pictureSlot');
+    if (fig.parentNode !== slot) slot.prepend(fig);
+    fig.hidden = !picture;
+    $('#pictureBox').hidden = !picture || beside;
+    $('#dfdCompare').classList.toggle('two', beside);
+    const want = 'preview' in state.open ? state.open.preview : beside;
+    if (d.open !== want) { d.dataset.auto = String(want); d.open = want; }
+    if (d.open) drawDfd();
+  }
+
+  function drawDfd() {
+    const m = state.model;
+    const frame = $('#dfdFrame');
+    if (!m) return;
+    if (!m.elements.length && !m.zones.length) {
+      frame.replaceChildren(el('p', { class: 'dfd-empty', text: 'Nothing to draw yet: add the zones, elements and data flows below.' }));
+      $('#dfdCaption').textContent = 'The DFD';
+      return;
+    }
+    let svg;
+    try { svg = DfdCheck.toSvg(m); } catch (e) {
+      console.error(e);
+      frame.replaceChildren(el('p', { class: 'dfd-empty', text: 'The DFD couldn’t be drawn.' }));
+      return;
+    }
+    if ($('#dfdZoom').getAttribute('aria-pressed') === 'true') svg.style.width = `${svg.viewBox.baseVal.width}px`;
+    frame.replaceChildren(svg);
+    const loose = [...m.zones, ...m.elements].filter(x => !box(x.geometry)).length;
+    // the diagram's own layout: a redraw held back, or one undone (the check would make it again)
+    const w = wouldFix(), own = !redrawn() && (!!w.held || w.fixes.some(f => LAYOUT_FIXES.has(f.code)));
+    $('#dfdCaption').textContent = !loose ? (own ? 'The DFD, in the diagram’s own layout' : 'The DFD as checked')
+      : loose === m.zones.length + m.elements.length ? 'The DFD, laid out automatically (nothing here has a position from a diagram)'
+        : `The DFD as checked, with ${plural(loose, 'zone or element', 'zones or elements')} that ${loose === 1 ? 'has' : 'have'} no place in the diagram put where there is room`;
+  }
+
+  /**
+   * Put back what the DFD check fixed (when the decomposition was read, or since, on asking): each element's zone (where it
+   * is still in the zone the check put it in), the positions of the zones and elements, the page, and a label it took a ★
+   * from. Other edits stay.
+   */
+  function undoFixes() {
+    const d = state.dfd, m = state.model;
+    if (!d.read || !m || state.busy) return;
+    const zonesRead = new Map(d.read.zones.map(z => [z.id, z])), elsRead = new Map(d.read.elements.map(e => [e.id, e]));
+    const zoneIds = new Set(m.zones.map(z => z.id));
+    const els = new Map(m.elements.map(e => [e.id, e]));
+    for (const f of d.fixes) {
+      const e = els.get(f.element);
+      if (!e) continue;
+      if (f.code === 'zone' && (e.zone || null) === (f.to || null) && (!f.from || zoneIds.has(f.from))) e.zone = f.from || null;
+      const r = elsRead.get(e.id);
+      if (f.code === 'star' && r && e.crownJewel === true && String(r.label).replace(/\s*★\s*$/u, '') === e.label) {
+        e.label = r.label;
+        e.crownJewel = typeof r.crownJewel === 'boolean' ? r.crownJewel : null;
+      }
+    }
+    for (const z of m.zones) { const r = zonesRead.get(z.id); if (r) home.set(z.id, { geometry: box(r.geometry), parent: r.parent || null }); }
+    for (const e of m.elements) { const r = elsRead.get(e.id); if (r) home.set(e.id, { geometry: box(r.geometry), zone: r.zone || null }); }
+    m.page = d.read.page && typeof d.read.page === 'object' ? clone(d.read.page) : null;
+    applyLayout();
+    const n = d.fixes.length;
+    state.dfd = { read: null, fixes: [], result: null };
+    afterFixes('dfd:apply', `Put back the decomposition as read: the ${plural(n, 'fix', 'fixes')} the DFD check made ${n === 1 ? 'is' : 'are'} undone.`);
+  }
+
+  /**
+   * Make the DFD check's fixes on the decomposition as it stands (after Undo, or on one kept as it was read); always: with
+   * the layout redrawn even where that adds geometry problems (as the user asked). Fixes made on top of standing ones
+   * are undone with them.
+   */
+  function applyFixes(always) {
+    const m = state.model;
+    if (!m || state.busy) return;
+    let r;
+    try { r = DfdCheck.check(m, { fix: true, redraw: always ? 'always' : 'auto' }); } catch (e) {
+      console.error(e);
+      say($('#dfdStatus'), `The fixes couldn’t be made: ${e.message}`, 'err');
+      return;
+    }
+    if (!r.fixes.length) { say($('#dfdStatus'), 'There is nothing to fix.'); return; }
+    const d = state.dfd;
+    state.dfd = d.read && d.fixes.length ? { read: d.read, fixes: d.fixes.concat(r.fixes), result: null } : { read: clone(m), fixes: r.fixes, result: null };
+    state.model = r.model;
+    // where the fixed decomposition puts what has a place; what has none keeps the place it had
+    for (const z of r.model.zones) if (box(z.geometry)) home.set(z.id, { geometry: box(z.geometry), parent: z.parent || null });
+    for (const e of r.model.elements) if (box(e.geometry)) home.set(e.id, { geometry: box(e.geometry), zone: e.zone || null });
+    afterFixes('dfd:undo', always ? `Redrew the diagram in CSA notation, as you asked: ${plural(r.fixes.length, 'fix', 'fixes')}. Undo the fixes to keep the diagram’s own layout.`
+      : `Applied the DFD check’s ${plural(r.fixes.length, 'fix', 'fixes')}.`);
+  }
+
+  /** After Undo or Apply: the decomposition is kept, shown and checked again, and keyboard focus goes to the button that undoes it. */
+  function afterFixes(focusKey, text) {
+    state.rev++;
+    dropUndo();
+    persist();
+    renderDecomposition();
+    markStale();
+    say($('#dfdStatus'), text, 'ok');
+    const b = $(`#dfdCheck [data-key="${CSS.escape(focusKey)}"]`);
+    if (b) b.focus();
+    else if (focusLost()) focusTo('#dfdDownload');
+  }
+
+  const slugOf = m => String(m.name || 'system').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'system';
+
+  // The decomposition both files are written from: one for each revision, so that the component context is keyed by the
+  // ids the draw.io file gives the elements (finish() names what has no id), whichever is downloaded first.
+  let filed = { rev: -1, of: null, model: null };
+  function fileModel() {
+    if (filed.rev !== state.rev || filed.of !== state.model) filed = { rev: state.rev, of: state.model, model: TMParse.finish(clone(state.model)) };
+    return filed.model;
+  }
+
+  /**
+   * The DFD as a draw.io file in CSA notation (what draw.io opens), or the component context that goes with it: the
+   * cyber-threat-modelling skill's parser reads only each shape's label, style and size in a draw.io file, so it takes the
+   * context (--context) from this file, keyed by the ids in the draw.io one. The two names start alike, to go together.
+   */
+  function downloadDfd(what) {
     const m = state.model;
     if (!m) return;
-    const words = editorWording();
-    let list = [];
-    try { list = TMParse.finish(clone(m)).warnings.map(w => words.get(w) || w); } catch (_) { /* checked again when the model runs */ }
-    const bare = m.elements.filter(missingContext).length;
-    if (bare) list.push(`${bare} element${bare === 1 ? ' has' : 's have'} no context (marked on the left): their threats will be generic and their severity understated.`);
-    const names = m.elements.map(e => e.label.trim().toLowerCase());
-    const dupe = names.findIndex((l, i) => l && names.indexOf(l) !== i);
-    if (dupe >= 0) list.push(`Two elements share the name "${m.elements[dupe].label.trim()}": give each a distinct name so the register is unambiguous.`);
-    const ul = $('#decompWarnings');
-    ul.replaceChildren(...list.map(t => el('li', { text: t })));
-    ul.hidden = !list.length;
-    updateRun();
+    const json = what === 'context', slug = slugOf(m);
+    const name = json ? `${slug}-dfd-context.json` : `${slug}-dfd.drawio`;
+    try {
+      const fm = fileModel();
+      if (json) save(new Blob([`${JSON.stringify(DfdCheck.toContext(fm), null, 2)}\n`], { type: 'application/json' }), name);
+      else save(new Blob([DfdCheck.toDrawio(fm)], { type: 'application/xml' }), name);
+      say($('#dfdStatus'), json
+        ? `Saved ${name}: each element’s name, type and context, keyed by its id in ${slug}-dfd.drawio. Give the two files together to a `
+          + 'threat-modelling tool that reads only the shapes, such as the cyber-threat-modelling skill. That skill rates an element a crown '
+          + 'jewel by words in its name and context (restricted, PII, payment, credential…), not by the ★ or the Crown jewel setting.'
+        : `Saved ${name}: the DFD in CSA notation, with each element’s context in its properties; it opens in draw.io. A threat-modelling `
+          + 'tool that reads only the shapes, such as the cyber-threat-modelling skill, takes each element’s type from its shape and its '
+          + 'trust zone from where it is drawn, but not the properties: give it the component context file too.', 'ok');
+    } catch (e) {
+      console.error(e);
+      say($('#dfdStatus'), `The ${json ? 'component context' : 'draw.io'} file couldn’t be written: ${e.message}`, 'err');
+    }
   }
 
   // ---- adding and removing
@@ -1446,8 +1994,7 @@
 
   function saveDecomposition(line) {
     if (!state.model) return;
-    const slug = String(state.model.name || 'system').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'system';
-    const name = `${slug}-decomposition.json`;
+    const name = `${slugOf(state.model)}-decomposition.json`;
     save(new Blob([TMParse.toJson(state.model)], { type: 'application/json' }), name);
     if (line) say(line, `Saved a copy as ${name}.`, 'ok');
     else editNote(`Saved a copy as ${name}.`, 'ok');
@@ -1577,7 +2124,7 @@
     } finally {
       state.running = false;
       setBusy(false);
-      renderWarnings();
+      if (state.model) renderCheck();
       if (focused && focusLost()) focusTo('#runBtn');
     }
   }
@@ -2027,9 +2574,13 @@
       kpi(s.events, `ATT&CK threat events (${s.high} High, ${s.medium} Medium, ${s.low} Low)`),
       kpi(s.aiEvents, `AI threat events (MAESTRO / ATLAS)`),
       kpi(r.sequences.length, 'attack sequences'));
+    // the decomposition's own problems are the DFD check's to say (step 3); here, what the run found (the register's
+    // About sheet still lists both)
+    const said = new Set(r.model && Array.isArray(r.model.warnings) ? r.model.warnings : []);
+    const own = r.warnings.filter(w => !said.has(w));
     const warns = $('#runWarnings');
-    warns.replaceChildren(...r.warnings.map(w => el('li', { text: w })));
-    warns.hidden = !r.warnings.length;
+    warns.replaceChildren(...own.map(w => el('li', { text: w })));
+    warns.hidden = !own.length;
     const counts = { events: r.events.length, profile: r.lenses.length, sequences: r.sequences.length };
     if (!TABS.some(t => t[0] === state.tab)) state.tab = 'events';
     $('#resultTabs').replaceChildren(...TABS.map(([key, label]) => el('button', {
@@ -2190,12 +2741,15 @@
       const loops = flows.filter(loop).length;
       // it keeps its id and its number; one kept by an earlier version of this page gets an id, kept with it from now on
       const gen = typeof saved.gen === 'string' && saved.gen ? saved.gen : '';
+      // one kept before the DFD check existed is checked now, as one just read is
       setModel(TMParse.finish(Object.assign({}, saved.model, { flows: flows.filter(f => !loop(f)) })),
-        { savedHome: saved.home, gen: gen || newGen(), write: !gen || loops > 0 });
-      if (gen && !loops) state.saved = { gen, rev: Number.isInteger(saved.rev) ? saved.rev : 0 };
+        { savedHome: saved.home, gen: gen || newGen(), write: !gen || loops > 0, dfd: saved.dfd === undefined ? undefined : saved.dfd });
+      const checked = saved.dfd === undefined && state.dfd.fixes.length;
+      if (gen && !loops && !checked) state.saved = { gen, rev: Number.isInteger(saved.rev) ? saved.rev : 0 };
       say($('#diagramStatus'), 'Restored the decomposition you were working on.'
         + (loops ? ` ${plural(loops, 'data flow')} from an element to itself ${loops === 1 ? 'was' : 'were'} left out.` : '')
-        + (saved.model.source && saved.model.source.kind === 'image' ? ' (The picture isn’t kept between visits.)' : ''));
+        + (saved.model.source && saved.model.source.kind === 'image' ? ' (The picture isn’t kept between visits.)' : '')
+        + (checked ? checkSaid() : ''));
     } catch (_) {
       store.remove(TM_KEY);
     }
@@ -2249,6 +2803,20 @@
     $('#pictureZoom').addEventListener('click', () => {
       $('#pictureZoom').setAttribute('aria-pressed', String($('#pictureFrame').classList.toggle('full')));
     });
+    $('#dfdDownload').addEventListener('click', () => downloadDfd('drawio'));
+    $('#dfdContext').addEventListener('click', () => downloadDfd('context'));
+    $('#dfdPreview').addEventListener('toggle', () => {
+      const d = $('#dfdPreview');
+      if (d.dataset.auto !== String(d.open)) state.open.preview = d.open;   // the user's choice, not the page's default
+      d.dataset.auto = '';
+      if (d.open) drawDfd();
+    });
+    $('#dfdZoom').addEventListener('click', () => {   // a toggle: its name stays, pressed says which way it is
+      const full = $('#dfdZoom').getAttribute('aria-pressed') !== 'true';
+      $('#dfdZoom').setAttribute('aria-pressed', String(full));
+      $('#dfdFrame').classList.toggle('full', full);
+      drawDfd();
+    });
     document.addEventListener('keydown', undoKey);
     $('#runBtn').addEventListener('click', () => run());
     $('#enrichChk').addEventListener('change', e => {
@@ -2278,7 +2846,7 @@
       state.dataError = e.message || String(e);
       $('#profileBody').replaceChildren(el('p', { class: 'busy-line err', text: `The MITRE data couldn't be loaded: ${state.dataError}` }));
     }
-    if (state.model) renderWarnings();
+    if (state.model) renderCheck();
     updateRun();
     if (rec) {
       await claude;

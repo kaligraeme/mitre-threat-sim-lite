@@ -92,6 +92,27 @@ maps it to mitigations and detections.
 4. **Export:** an Excel workpaper (below), a CSV of the technique mapping, or Navigator layers (one
    JSON per domain; the ATLAS layer opens in the ATLAS Navigator).
 
+**Coverage at a glance.** Above the result tabs, four tiles count the profile's techniques, mitigations,
+detection strategies and data components. A fifth gives the number of techniques with no mitigation or
+detection in place, with a spider chart of **average coverage by tactic**: one axis per tactic the profile's
+techniques fall under, in matrix order, and three rings as levels:
+
+- **1** no coverage (red);
+- **2** partial: mitigated or detected only (amber);
+- **3** mitigated + detected (green).
+
+A tactic's point sits at the average level of its techniques (a technique under several tactics counts in
+each), so it moves outward as you mark mitigations in place and detections deployed; its dot takes the
+colour of the highest level that average reaches. Averages are rounded down to one decimal, so 3.0 means
+every technique of the tactic is mitigated and detected. There is one chart per domain, with a switch when
+the profile spans several; it opens on the domain you last picked with that switch (remembered from one
+profile to the next), otherwise on Enterprise unless Enterprise has nothing to chart. ATLAS has no
+detection strategies, so ATLAS tactics top out at 2. With fewer than three tactics, or too many to label
+around a spider on a narrow screen, each tactic's average is shown as a dot on a line from 1 to 3 instead.
+Hover or tap an axis, or focus the chart and use the arrow keys, to see a tactic's numbers (Escape closes
+them); **Show as table** lists them all, under the KPI tiles (on a narrow screen such as a phone's, under
+the chart), and **How to read this chart** explains the scale.
+
 ATLAS has no detection strategies: its detection controls (for example *AML.M0024 AI Telemetry Logging
 and Monitoring*) are ATLAS mitigations, so ATLAS techniques count as mitigated or not, never as detected.
 The Detections and Telemetry views say so instead of showing empty tables.
@@ -236,6 +257,90 @@ method (STRIDE-LM gates, severity scoring, ATT&CK attack modelling), driven by T
    (pictures don't), and tabs open on the page share it; **Save the decomposition** downloads it.
    Replacing or clearing it asks first. The last ten removals, and a loaded context file, can be undone,
    latest first, with **Undo** at the foot of the editor or Ctrl+Z (⌘Z on a Mac) outside a text field.
+
+   **The DFD check.** As soon as a decomposition is set (a draw.io, PowerPoint or JSON file, the example,
+   Claude's reading of a picture, a picture decomposed by hand, or the decomposition restored from your
+   last visit), the page checks it with the method of the `architecture-to-drawio-dfd` skill (its
+   `dfd_drawio.py`, ported to `js/tm-dfdcheck.js`). A **DFD check** panel above the editor shows:
+   - **The fixes it makes itself.** An element drawn in another trust zone than the one it was given is
+     put in the innermost zone its centre is drawn in. One centred exactly on a border of its own zone (a
+     firewall drawn on the boundary between two zones, whatever their sizes, or on the edge of a zone
+     inside its own) keeps its zone: a redraw moves it inside that zone, and a layout kept as drawn lists
+     it as straddling that border.
+     When every element and zone has a position, the layout is redrawn in CSA notation: scaled to about
+     2,200 px wide from the drawing's own width (a picture Claude read is scaled from the picture's
+     width, as the skill does), each element at the standard size for
+     its type, centred where the diagram draws it, elements that would overlap moved apart inside their
+     zone, and zones enlarged where they no longer fit what they hold. A picture Claude read is always
+     redrawn, as the DFD method lays out what it reads, and what is still wrong is listed. Any other
+     diagram is redrawn unless the redrawn layout would have more problems with where things are drawn in
+     all (elements overlapping, outside or across the border of their trust zone, or inside one they
+     aren't in; trust zones overlapping) than the diagram as drawn: then it keeps its own layout, and the
+     panel says what the redraw would add and offers **Redraw in CSA notation anyway**. A decomposition
+     laid out already (by this page, or a file the skill wrote) isn't scaled again. Every trust zone is
+     made at least 20,400 px², as the `cyber-threat-modelling` skill's parser takes a dashed box under
+     20,000 px² for an element unless its name has a zone word (a fix of its own when the diagram keeps its
+     layout). A ★ after an element's name is read as the crown-jewel mark. **Undo the fixes** puts back
+     the zones and the layout as read, small zones included (see the draw.io file below); your other
+     edits stay. **Apply the fixes** makes them again.
+   - **What is left to look at**, errors first, each with what to do and a button that opens the editor
+     at the row concerned: data flows that don't join two elements, elements with no data flow, elements
+     outside every trust zone (not external entities, which usually are), trust zones that hold nothing,
+     no trust zones at all, elements drawn outside their zone, on a zone's border or overlapping, elements
+     with no context, no crown jewel marked, and names missing or used twice. The check never adds a data
+     flow, or puts an element in a zone, that the diagram doesn't show. It runs again as you edit, so a
+     finding goes as soon as it is fixed, and a screen reader hears how much is left when that changes,
+     except when the editor's status line already speaks for the edit (a removal, Undo or Ctrl+Z, a flow
+     reversed, a context file loaded, changes made in another tab): then the new count is shown in the
+     panel only, and a screen reader hears the count again when it next changes.
+     None of these stops the threat model; the line under **Run** says how many are still open. The threat
+     model and both deliverables use the decomposition as checked.
+   - **A preview of the DFD in CSA notation**, with a picture Claude read shown beside it so the two can
+     be compared. An element added by hand, or moved to another zone, has no position from the diagram:
+     the preview and the draw.io file put it in a free spot of its zone, and when the zone is full they
+     make room in it: everything below that spot (or to its right) moves along and the zones across that
+     line grow, so no other element changes zone and no zone comes to overlap another. Where a zone that
+     partly overlaps this one would grow along with it, the room is made just before or past that zone
+     instead. The drawing may get bigger. An element in no zone (added so, or moved out of its zone) goes
+     below the diagram, and so would one in a zone that other zones cover entirely, which leaves no room
+     to make. In a decomposition saved with some positions and not others, what is in a zone with no
+     position is laid out with that zone.
+   - Two downloads that go together:
+     - **Download as draw.io (CSA DFD)**, `<system>-dfd.drawio`: the skill's draw.io file, with blue CSA
+       shapes, red dashed trust zones and dark-red outer zones, connectors glued to their elements, a ★
+       after a crown jewel's name, and each element's type, purpose, sensitivity, authentication, trust,
+       crown-jewel and AI flags as its draw.io properties (*Edit Data*). It opens in draw.io. For tools
+       that read only the shapes, two style keys are added to the skill's: `shape=csaActor` on external
+       entities (draw.io has no shape of that name and draws its plain rectangle) and `double=1` on
+       clusters (draw.io ignores it on a double ellipse). An element drawn at 20,000 px² or more (only a
+       diagram that keeps its own layout has one: every standard size is smaller) whose name has a zone
+       word (network, cloud, internal, tier…) gets draw.io's default fill, as the skill's parser takes a
+       large box with no fill and such a name for a trust zone. An element centred exactly on the border
+       of a zone it isn't in is written a pixel inside its own zone, so readers that go by the centre put
+       it there. An element centred where two zones inside its own zone meet can't be moved out of both:
+       the file puts it in one of them.
+       For the decomposition as checked, with the check's fixes standing, the `cyber-threat-modelling`
+       skill's parser (`parse_drawio.py`) reads from it every element's type (from its shape) and trust
+       zone (from where it is drawn), every trust zone, and every data flow's ends and label, as the check
+       has them (tested on the example and the test diagrams, and on edits of them); the names of crown
+       jewels end in " ★" there. It doesn't read the properties. After **Undo the fixes** the file has the
+       diagram's own zones and positions, and that parser reads a dashed zone under 20,000 px² whose name
+       has no zone word as an element (what it holds goes in the zone round it, if there is one).
+     - **Download component context (JSON)**, `<system>-dfd-context.json`: each element's name, type,
+       purpose, sensitivity, authentication and trust (and its crown-jewel and AI flags, when set), keyed
+       by its id in the draw.io file, in the form of that skill's `component_context.json`. A field left
+       empty isn't written, so the skill uses its own words for it (an attacker "defeating its
+       authentication mechanism", "sensitive" data) rather than a blank. Give the skill both files (its
+       `--drawio` and `--context`). The skill rates an element a crown jewel by words in its name and
+       context (restricted, classified, PII, personal data, payment, card, financial, health, secret,
+       credential…), not by the ★ or the crown-jewel flag; the page adds no words to your context, so say
+       in an element's sensitivity what makes it a crown jewel.
+
+     A decomposition downloaded as checked and uploaded here again has nothing to fix (rarely, an element
+     written a pixel inside its zone comes to touch a neighbour there, and the upload is then redrawn).
+     After **Undo the fixes** the file has the diagram's own positions, so an element the panel lists as
+     drawn in another zone than its own is read, here and by the skill, in the zone it is drawn in; uploaded
+     here again, the file is fixed again, as the diagram was.
 4. **Threat model** (CSA §3.3), built in the browser in well under a second:
    - **Sectorial Threat Profile.** The profile's ATT&CK techniques are grouped into themes (edge
      exploitation, network-device compromise, virtualisation, credential abuse, cloud, implants,
@@ -279,7 +384,8 @@ method (STRIDE-LM gates, severity scoring, ATT&CK attack modelling), driven by T
      yellow star, and each threat-event location as a red octagon with its DFD number. Figure 1 is the
      whole DFD; then one slide per attack sequence, with the path highlighted and the rest faded; then
      the AI threats and the AI attack sequences. When the diagram had positions (draw.io, PowerPoint, or
-     a picture read by Claude), the DFD keeps its layout; otherwise it is laid out in rows of zones.
+     a picture read by Claude), the DFD keeps its layout, as the DFD check left it; otherwise it is laid
+     out in rows of zones.
 
    The workbook is built with ExcelJS (above) and the deck with
    [PptxGenJS](https://github.com/gitbrent/PptxGenJS) 4.0.1 (MIT, `js/vendor/pptxgen.bundle.js`, which
@@ -298,7 +404,15 @@ If the server's operator sets `ANTHROPIC_API_KEY` and installs the Anthropic Pyt
 (`pip install -U "anthropic>=0.108"`, Python 3.10 or later), the tab can also:
 
 - **Read the picture with Claude:** read a picture of a diagram into a decomposition, with positions
-  taken from the picture, for you to check.
+  taken from the picture, for you to check. Claude is asked to follow the DFD method's rules for reading
+  a picture (this has been tested against a mock of the API only): trust zones are the containers that
+  mark a change in trust (a network segment, a DMZ, a cloud account, a third party's area, a national or
+  sovereign boundary…), not those that only group things; external entities include external SaaS and
+  the Internet; an element's box is its icon or shape (not icon and caption) and its centre decides its
+  zone; a caption's second line goes in purpose; an inference is allowed only when marked "(assumed)"; a
+  bus or fan-out line becomes one flow per pair it joins (beyond about 12, one to the nearest
+  representative element, said in the notes); flows join elements, never zones; and likely crown jewels
+  are proposed in its notes for you to confirm. The DFD check (step 3) then redraws the reading.
 - **Have Claude write the threat events in more detail:** rewrite each event's title, sequence of
   attack and description, and each attack sequence's narrative, for this system and this threat actor.
 

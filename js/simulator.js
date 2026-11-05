@@ -223,6 +223,7 @@
       pickFamily: 'attack', pickTab: 'groups', lastTab: {}, search: '', matchDesc: false,
       swType: '', swPlatform: '', swCategory: '', csType: '', entType: '', purpose: '', campSince: '',
       tab: 'matrix', matrixDomain: null, colorMode: 'usage', showAll: false, filter: '', sort: {}, kevExploited: false,
+      spiderDomain: null, spiderTable: false, spiderHow: false,   // the coverage chart: domain picked, table shown, help open
     },
     results: [],
     catalogs: null,
@@ -243,7 +244,8 @@
       inPlace: { mitigations: [...state.inPlace.mitigations], detections: [...state.inPlace.detections] },
       ui: { pickFamily: state.ui.pickFamily, pickTab: state.ui.pickTab, lastTab: state.ui.lastTab, tab: state.ui.tab,
             colorMode: state.ui.colorMode, showAll: state.ui.showAll, matrixDomain: state.ui.matrixDomain, matchDesc: state.ui.matchDesc,
-            kevExploited: state.ui.kevExploited },
+            kevExploited: state.ui.kevExploited, spiderDomain: state.ui.spiderDomain, spiderTable: state.ui.spiderTable,
+            spiderHow: state.ui.spiderHow },
     };
     try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch (_) { /* storage unavailable */ }
   }
@@ -724,28 +726,30 @@
   }
 
   function renderKpis() {
+    hideTip();
     const t = totals();
     const tile = (lbl, val, sub) => el('div', { class: 'tile' },
       el('div', { class: 'lbl', text: lbl }), el('div', { class: 'val', text: val }), el('div', { class: 'sub', text: sub }));
-    const partial = t.mitigated + t.detected;
-    const seg = (n, color, label) => n ? el('span', { style: `flex:${n};background:${color}`, title: label + ': ' + n }) : null;
     const noPosture = !t.mitIn && !t.detIn;
+    const r = spiderResult();
+    const cov = tacticCoverage(r);
+    const plot = el('div', { class: 'sp-plot' });
+    // the headline figure first (export.js reads the gap from the hero's first .val), then the chart, then its key:
+    // on a phone the chart comes straight after the figure; wider, the key sits under the figure, beside the chart
     const hero = el('div', { class: 'tile hero' },
-      el('div', { class: 'lbl', text: 'Techniques with no mitigation or detection in place' }),
-      el('div', { class: 'val' }, fmtN(t.gap), el('small', { text: pct(t.gap, t.tech) + ' of ' + fmtN(t.tech) })),
-      el('div', { class: 'stack', role: 'img', 'aria-label': `Covered ${t.covered}, partial ${partial}, no coverage ${t.gap}` },
-        seg(t.covered, 'var(--good)', STATUS.covered.label),
-        seg(partial, 'var(--warning)', 'Partial'),
-        seg(t.gap, 'var(--critical)', STATUS.gap.label)),
-      el('div', { class: 'legend' },
-        el('span', {}, el('span', { class: 'sw', style: 'background:var(--good)' }), STATUS.covered.label + ' ' + fmtN(t.covered)),
-        el('span', {}, el('span', { class: 'sw', style: 'background:var(--warning)' }), 'Partial ' + fmtN(partial) + ' (M ' + t.mitigated + ' · D ' + t.detected + ')'),
-        el('span', {}, el('span', { class: 'sw', style: 'background:var(--critical)' }), STATUS.gap.label + ' ' + fmtN(t.gap))),
-      noPosture ? el('div', { class: 'sub', style: 'margin-top:6px', text: 'Mark mitigations as in place and detections as deployed to simulate your coverage.' }) : null,
+      el('div', { class: 'hero-head' },
+        el('div', { class: 'lbl', text: 'Techniques with no mitigation or detection in place' }),
+        el('div', { class: 'val' }, fmtN(t.gap), el('small', { text: pct(t.gap, t.tech) + ' of ' + fmtN(t.tech) })),
+        noPosture ? el('div', { class: 'sub', style: 'margin-top:6px', text: 'Mark mitigations as in place and detections as deployed to simulate your coverage.' }) : null),
+      spiderFigure(r, cov, plot),
+      levelsKey(),
     );
     // ATLAS defines no detection strategies, so its techniques can only be mitigated
-    const atlas = state.results.filter(r => familyOf(r.domain) === 'atlas').length;
+    const atlas = state.results.filter(x => familyOf(x.domain) === 'atlas').length;
     const atlasOnly = atlas === state.results.length;
+    // a control of the coverage tile (domain switch, the chart, table toggle, How to read) had focus: give it to its replacement
+    const active = document.activeElement;
+    const place = active && $('#kpis').contains(active) ? placeOf(active) : null;
     $('#kpis').replaceChildren(
       tile('Techniques in scope', fmtN(t.tech), fmtN(t.subs) + ' sub-techniques · ' + t.tacticsHit + ' of ' + t.tacticsAll + ' tactics'),
       tile('Mitigations', fmtN(t.mit), fmtN(t.mitIn) + ' in place'),
@@ -755,6 +759,577 @@
         : 'telemetry the detections rely on' + (t.dcShared ? ` · ${fmtN(t.dcShared)} used by more than one domain` : '')),
       hero,
     );
+    placeSpiderTable();
+    watchKpiWidth();
+    if (cov.axes.length >= 3) mountSpider(plot, r, cov.axes); else stopSpider();
+    watchTaps();
+    if (place && (!document.activeElement || document.activeElement === document.body)) focusQuiet(findPlace(place));
+  }
+
+  /**
+   * Where "Show as table" shows the table: under the chart while the coverage tile is one column (phones); wider, on
+   * a row of its own under the KPI tiles, as wide as all of them, so every column fits and the tiles beside the chart
+   * keep their height. Hidden, it stays in the same place for screen readers. Runs on each render, and when the KPI
+   * area changes width (the tile's columns come from a container query).
+   */
+  function placeSpiderTable() {
+    const wrap = $('#spiderTable'), kpis = $('#kpis');
+    const hero = wrap && kpis.querySelector('.hero');
+    if (!hero || !hero.getClientRects().length) return;   // not laid out: placed when it is
+    const oneColumn = getComputedStyle(hero).gridTemplateColumns.trim().split(/\s+/).length < 2;
+    const home = oneColumn ? hero.querySelector('figure.spider') : kpis;
+    if (wrap.parentElement === home) return;
+    const focused = wrap.contains(document.activeElement) ? document.activeElement : null;
+    home.append(wrap);
+    if (!focused) return;
+    focused.focus({ preventScroll: true });
+    // the sideways scroller is a Tab stop only while it scrolls (phones): once it no longer does, the table keeps the focus
+    if (!wrap.contains(document.activeElement)) wrap.querySelector('table').focus({ preventScroll: true });
+  }
+  /**
+   * The table's scroller lost the focus: when a wider window stopped it scrolling (with or before a move), the
+   * browser took the focus away, to nothing. The table takes it then, on the next frame, if nothing else has.
+   */
+  function keepTableFocus(e) {
+    const sc = e.currentTarget;
+    if (e.target !== sc || e.relatedTarget || sc.scrollWidth > sc.clientWidth) return;
+    requestAnimationFrame(() => {
+      const table = sc.querySelector('table');
+      if (table && table.isConnected && (!document.activeElement || document.activeElement === document.body)) table.focus({ preventScroll: true });
+    });
+  }
+  let kpiWatch = null;
+  function watchKpiWidth() {
+    if (kpiWatch || typeof ResizeObserver !== 'function') return;
+    // on the next frame, not inside the observer (moving the table changes the area's height)
+    kpiWatch = new ResizeObserver(() => requestAnimationFrame(placeSpiderTable));
+    kpiWatch.observe($('#kpis').parentElement);
+  }
+
+  // ---------- coverage by tactic: the spider chart in the hero tile ----------
+
+  // The chart's rings. A technique scores 3 when it is mitigated and detected, 2 when only one of the two is in
+  // place (partial), 1 when neither is; a tactic's point sits at the average score of its profile techniques.
+  const LEVELS = [
+    { n: 1, label: STATUS.gap.label, icons: ['gap'] },
+    { n: 2, label: 'Partial', icons: ['mitigated', 'detected'] },
+    { n: 3, label: STATUS.covered.label, icons: ['covered'] },
+  ];
+  const LEVEL_OF = { gap: 1, mitigated: 2, detected: 2, covered: 3 };
+
+  /**
+   * One result's coverage per tactic, in matrix order, for the tactics with at least one profile technique:
+   * axes [{ tactic, n, covered, partial, gap, sum }] (sum adds up the scores, so the average is sum / n). A technique
+   * under several tactics counts in each; unplaced counts techniques under no tactic of the matrix.
+   */
+  function tacticCoverage(r) {
+    const rows = new Map(r.model.tactics.map(ta => [ta.shortname, { tactic: ta, n: 0, covered: 0, partial: 0, gap: 0, sum: 0 }]));
+    let unplaced = 0;
+    for (const t of r.techniques.values()) {
+      let placed = false;
+      for (const sn of new Set(t.tech.tactics || [])) {
+        const a = rows.get(sn);
+        if (!a) continue;
+        placed = true;
+        a.n++;
+        a.sum += LEVEL_OF[t.status];
+        if (t.status === 'covered') a.covered++; else if (t.status === 'gap') a.gap++; else a.partial++;
+      }
+      if (!placed) unplaced++;
+    }
+    return { axes: [...rows.values()].filter(a => a.n), unplaced };
+  }
+  // In whole numbers, so 3 (and 3.0) only when every technique of the tactic scores 3, and a dot's colour always
+  // agrees with the figure shown beside it.
+  /** The highest level a tactic's average reaches: 1, 2 or 3. */
+  const levelReached = a => (a.sum >= 3 * a.n ? 3 : a.sum >= 2 * a.n ? 2 : 1);
+  /** A tactic's average to one decimal, rounded down. */
+  const avgText = a => (Math.floor((10 * a.sum) / a.n) / 10).toFixed(1);
+
+  /**
+   * The result the chart shows: the domain picked with its switch; else Enterprise when it has a tactic to chart;
+   * else the first result that has one; else Enterprise, else the first.
+   */
+  function spiderResult() {
+    const charted = r => tacticCoverage(r).axes.length > 0;
+    const ent = state.results.find(r => r.domain === 'enterprise-attack');
+    return state.results.find(r => r.domain === state.ui.spiderDomain)
+      || (ent && charted(ent) ? ent : null) || state.results.find(charted) || ent || state.results[0];
+  }
+
+  /**
+   * The levels, with the status icons the matrix and tables use: the key to the rings and the dots, and how to read
+   * the chart (closed until asked for; it stays open across re-renders).
+   */
+  function levelsKey() {
+    const how = el('details', { class: 'sp-how', open: !!state.ui.spiderHow },
+      el('summary', { data: { key: 'spider|how' }, text: 'How to read this chart' }),
+      el('p', { text: 'A tactic\'s point sits at the average level of its techniques (a technique under several tactics counts in each), '
+        + 'and its dot takes the colour of the highest level that average reaches. Averages are shown rounded down to one decimal, '
+        + 'so 3.0 means every technique is mitigated and detected.' }));
+    how.addEventListener('toggle', () => { if (!!state.ui.spiderHow !== how.open) { state.ui.spiderHow = how.open; persist(); } });
+    return el('div', { class: 'sp-key' },
+      el('ul', { 'aria-label': 'Coverage levels' }, ...LEVELS.map(l => el('li', {},
+        el('span', { class: 'stat-badge sp-icons', 'aria-hidden': 'true' }, ...l.icons.map(k => el('span', { class: 'ic ' + k, text: STATUS[k].icon }))),
+        el('span', {}, el('b', { text: l.n + ' ' }), l.label + (l.n === 2 ? ': mitigated or detected only' : ''))))),
+      how);
+  }
+
+  function spiderFigure(r, cov, plot) {
+    const { axes, unplaced } = cov;
+    const label = domainLabel(r.domain);
+    const atlas = familyOf(r.domain) === 'atlas';
+    const c = r.statusCounts;
+    const many = state.results.length > 1;
+    // the caption is shown above the table's sideways scroller (inside it, a phone would cut it off)
+    const caption = 'Coverage by tactic, ' + domainTitle(r.domain) + ' (levels: 1 no coverage, 2 partial, 3 mitigated + detected; '
+      + 'averages rounded down to one decimal' + (axes.length > 1 ? '; a technique under several tactics counts in each' : '') + ')';
+    const tableWrap = el('div', { id: 'spiderTable', class: 'sp-table-wrap' + (state.ui.spiderTable ? '' : ' vh') },
+      el('p', { class: 'sp-table-note', 'aria-hidden': 'true', text: caption }),
+      el('div', { class: 'table-scroll', on: { focusout: keepTableFocus } }, spiderTable(axes, caption)));
+    const toggle = el('button', {
+      type: 'button', class: 'sp-btn', 'aria-pressed': String(!!state.ui.spiderTable), 'aria-controls': 'spiderTable',
+      data: { key: 'spider|table' }, text: 'Show as table',
+      on: { click: () => {
+        state.ui.spiderTable = !state.ui.spiderTable;
+        persist();
+        toggle.setAttribute('aria-pressed', String(state.ui.spiderTable));
+        tableWrap.classList.toggle('vh', !state.ui.spiderTable);
+      } },
+    });
+    // the domain's techniques, each counted once (the table and the chart count a technique under each of its tactics)
+    const counts = !r.techniques.size ? null : label + ' · ' + plural(r.techniques.size, 'technique', 'techniques') + ': ' + (atlas
+      ? fmtN(c.mitigated) + ' mitigated, ' + fmtN(c.gap) + ' no coverage.'
+      : fmtN(c.covered) + ' mitigated + detected, ' + fmtN(c.mitigated + c.detected) + ' partial (M ' + fmtN(c.mitigated) + ' · D '
+        + fmtN(c.detected) + '), ' + fmtN(c.gap) + ' no coverage.');
+    return el('figure', { class: 'spider', 'aria-labelledby': 'spiderTitle' },
+      el('div', { class: 'sp-head' },
+        el('span', { id: 'spiderTitle', class: 'sp-title', text: 'Average coverage by tactic' }),
+        many
+          ? el('div', { class: 'seg', role: 'group', 'aria-label': 'Domain shown in the chart' }, ...state.results.map(x => el('button', {
+            type: 'button', 'aria-pressed': String(x === r), text: domainLabel(x.domain), data: { key: 'spider|' + x.domain },
+            on: { click: () => { if (x === r) return; state.ui.spiderDomain = x.domain; persist(); renderKpis(); } },
+          })))
+          : el('span', { class: 'sp-domain', text: domainTitle(r.domain) })),
+      axes.length >= 3 ? plot : axes.length ? spiderRows(r, axes) : null,
+      // under the chart: what it covers, and the switch for the table that follows
+      el('div', { class: 'sp-foot' }, el('div', { class: 'sp-notes' },
+        counts ? el('p', { text: counts }) : null,
+        axes.length && axes.length < 3 ? el('p', { text: 'The profile\'s ' + label + ' techniques fall under only ' + plural(axes.length, 'tactic', 'tactics')
+          + '. A spider chart needs at least three, so ' + (axes.length === 1 ? 'its average is' : 'each tactic\'s average is') + ' shown on a line from 1 to 3.' }) : null,
+        !axes.length ? el('p', { text: r.techniques.size ? 'None of these techniques is under a tactic of the ' + domainTitle(r.domain) + ' matrix, so there is nothing to chart.'
+          : 'There are no ' + label + ' techniques to chart.' }) : null,
+        unplaced && axes.length ? el('p', { text: plural(unplaced, 'technique is', 'techniques are') + ' under no tactic of the ' + domainTitle(r.domain)
+          + ' matrix and ' + (unplaced === 1 ? 'is' : 'are') + ' left out of the chart.' }) : null,
+        atlas && axes.length ? el('p', { text: 'ATLAS has no detection strategies, so its techniques are only ever mitigated (2) or not covered (1): '
+          + 'ATLAS tactics top out at 2, inside the outer ring.' }) : null),
+        axes.length ? toggle : null),
+      axes.length ? tableWrap : null,
+    );
+  }
+
+  /**
+   * The chart's numbers as a table (visually hidden until "Show as table"; screen readers always have it). It can
+   * take the focus, though it is no Tab stop, for when the table moves (placeSpiderTable).
+   */
+  function spiderTable(axes, caption) {
+    // the average (what the chart draws) next to the tactic, so a phone shows both before the table scrolls sideways
+    const head = ['Tactic', 'Average', 'Techniques', STATUS.covered.label.replace(' + ', ' +\u00a0'), 'Partial', STATUS.gap.label];
+    return el('table', { class: 'data sp-table', tabindex: '-1' },
+      el('caption', { class: 'vh', text: caption }),
+      el('thead', {}, el('tr', {}, ...head.map((h, i) => el('th', { scope: 'col', class: i ? 'num' : null, text: h })))),
+      el('tbody', {}, ...axes.map(a => el('tr', { data: { tactic: a.tactic.shortname } },
+        el('th', { scope: 'row', text: a.tactic.name }),
+        el('td', { class: 'num', text: avgText(a) }),
+        ...[a.n, a.covered, a.partial, a.gap].map(v => el('td', { class: 'num', text: fmtN(v) }))))));
+  }
+
+  /**
+   * What the chart shows, in a sentence (its accessible name): the lowest and the highest average as shown, with
+   * every tactic at that figure (named up to three, then counted).
+   */
+  function spiderSummary(r, axes) {
+    const shown = axes.map(avgText);
+    const lo = shown.reduce((m, v) => (Number(v) < Number(m) ? v : m)), hi = shown.reduce((m, v) => (Number(v) > Number(m) ? v : m));
+    const at = v => {
+      const names = axes.filter((a, i) => shown[i] === v).map(a => a.tactic.name);
+      return v + ', for ' + (names.length <= 3 ? andList(names) : names.slice(0, 2).join(', ') + ' and ' + (names.length - 2) + ' more');
+    };
+    const what = domainLabel(r.domain) + ' tactic';
+    return 'Average coverage of ' + plural(axes.length, what, what + 's') + ', on a scale from 1 (no coverage) to 3 (mitigated and detected): '
+      + (axes.length === 1 ? axes[0].tactic.name + ' at ' + lo : lo === hi ? 'all at ' + lo : 'lowest ' + at(lo) + '; highest ' + at(hi))
+      + '. The table that follows lists every tactic.';
+  }
+
+  /** One tactic in words, for the screen reader as the arrow keys move along the chart. */
+  const spiderAxisText = a => a.tactic.name + ': average ' + avgText(a) + ' of 3. ' + plural(a.n, 'technique', 'techniques') + ': '
+    + fmtN(a.covered) + ' mitigated and detected, ' + fmtN(a.partial) + ' partial, ' + fmtN(a.gap) + ' no coverage.';
+
+  /**
+   * The tooltip for a tactic, at its dot (anchor). On the spider, plot is the box of the rings on screen: the tooltip
+   * keeps off it. It goes beside the rings on the axis's own side (dir: the axis's direction), else above or below
+   * them (the side the dot is on first), else beside them on the other side (a short window, such as a phone held
+   * sideways), wherever the window has room; prefer names the place to try first (the one it had, while it follows a
+   * scroll). A window too small for all of these gets the one of them, kept inside the window, that covers the least
+   * of the rings. The dot rows (no plot) put it beside the dot on its side, else the other, else below or above it.
+   * Returns the place used.
+   */
+  function spiderTip(anchor, a, dir = [1, 0], plot = null, prefer = null) {
+    const tip = $('#tip');
+    tip.replaceChildren(
+      el('b', { text: a.tactic.name }),
+      el('div', { class: 'row' }, el('strong', { class: 'tip-val', text: avgText(a) }), ' average level, rounded down'),
+      el('div', { class: 'row', text: plural(a.n, 'profile technique', 'profile techniques') + ': ' + fmtN(a.covered) + ' mitigated + detected, '
+        + fmtN(a.partial) + ' partial, ' + fmtN(a.gap) + ' no coverage' }),
+    );
+    tip.dataset.of = 'spider';   // Escape closes it wherever the focus is (closeSpiderTip)
+    tip.style.left = tip.style.top = '0px';   // measured at its natural width, wherever it was before
+    tip.hidden = false;
+    const b = anchor.getBoundingClientRect();
+    const w = tip.offsetWidth, h = tip.offsetHeight, gap = 10, pad = 8;
+    const clampX = x => Math.min(Math.max(pad, x), innerWidth - w - pad), clampY = y => Math.min(Math.max(pad, y), innerHeight - h - pad);
+    const fits = ([, x, y]) => x >= pad && x + w <= innerWidth - pad && y >= pad && y + h <= innerHeight - pad;
+    const midX = b.left + b.width / 2 - w / 2, midY = b.top + b.height / 2 - h / 2;
+    let spot = null;
+    if (plot) {
+      const above = ['above', clampX(midX), plot.top - gap - h], below = ['below', clampX(midX), plot.bottom + gap];
+      const right = ['right', plot.right + gap, clampY(midY)], left = ['left', plot.left - gap - w, clampY(midY)];
+      const ends = dir[1] < 0 ? [above, below] : [below, above], sides = dir[0] < 0 ? [left, right] : [right, left];
+      // an axis that points up or down has no side of its own: above or below it is. The far side comes last (it
+      // covers the other side's labels)
+      const places = Math.abs(dir[0]) < 0.25 ? ends.concat(sides) : [sides[0], ...ends, sides[1]];
+      const over = ([, x, y]) => {   // how much of the rings' box a place covers, once kept inside the window
+        x = clampX(x); y = clampY(y);
+        return Math.max(0, Math.min(x + w, plot.right) - Math.max(x, plot.left)) * Math.max(0, Math.min(y + h, plot.bottom) - Math.max(y, plot.top));
+      };
+      // where nothing fits outside the rings: the place that covers least of them, but never the dot it describes
+      const clear = places.filter(([, x, y]) => { x = clampX(x); y = clampY(y); return !(b.left < x + w && b.right > x && b.top < y + h && b.bottom > y); });
+      spot = places.find(p => p[0] === prefer && fits(p)) || places.find(fits)
+        || (clear.length ? clear : places).reduce((m, p) => (over(p) < over(m) ? p : m));
+    }
+    if (!spot) {
+      const right = b.right + gap + w <= innerWidth - pad, left = b.left - gap - w >= pad;
+      spot = left && (dir[0] < 0 || !right) ? ['dot', b.left - gap - w, midY] : right ? ['dot', b.right + gap, midY]
+        : ['dot', midX, b.bottom + gap + h <= innerHeight - pad ? b.bottom + gap : b.top - gap - h];
+    }
+    tip.style.left = clampX(spot[1]) + 'px';
+    tip.style.top = clampY(spot[2]) + 'px';
+    return spot[0];
+  }
+
+  /** Escape, wherever the focus is: close a tooltip the coverage chart (or its dot rows) opened, and its highlight. */
+  function closeSpiderTip() {
+    const tip = $('#tip');
+    if (tip.hidden || tip.dataset.of !== 'spider') return;
+    if (spider && spider.clear) spider.clear(); else hideTip();
+  }
+
+  /** Fewer than three tactics make no spider: each tactic's average as a dot on a 1-3 line instead. */
+  function spiderRows(r, axes) {
+    const rows = el('div', { class: 'sp-rows', role: 'img', 'aria-label': spiderSummary(r, axes) },
+      el('span'), el('span', { class: 'sp-scale' }, ...LEVELS.map(l => el('span', { class: 'l' + l.n, text: String(l.n) }))), el('span'),
+      ...axes.map((a, i) => el('div', { class: 'sp-row', data: { i: String(i), tactic: a.tactic.shortname } },
+        el('span', { class: 'sp-row-name', text: a.tactic.name }),
+        el('span', { class: 'sp-track' }, ...LEVELS.map(l => el('span', { class: 'sp-tick l' + l.n })),
+          el('span', { class: 'sp-mark l' + levelReached(a), style: 'left:' + ((a.sum / a.n - 1) * 50).toFixed(2) + '%' })),
+        el('span', { class: 'sp-row-val', text: avgText(a) }))));
+    rows.addEventListener('pointerover', e => {
+      const row = e.target.closest('.sp-row');
+      if (row) spiderTip(row.querySelector('.sp-mark'), axes[Number(row.dataset.i)]); else hideTip();
+    });
+    rows.addEventListener('pointerleave', e => { if (e.pointerType !== 'touch') hideTip(); });
+    return rows;
+  }
+
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  /** svgEl('circle', { cx, cy, r, class }, ...children): an SVG element (null attributes are skipped). */
+  function svgEl(tag, attrs, ...kids) {
+    const n = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(attrs || {})) if (v != null && v !== false) n.setAttribute(k, v);
+    append(n, kids);
+    return n;
+  }
+
+  let measureCtx;
+  /** Width of a text in a CSS font, from a canvas (the labels are laid out before they are drawn). */
+  function textWidth(text, font, px) {
+    if (measureCtx === undefined) measureCtx = document.createElement('canvas').getContext('2d');
+    if (!measureCtx) return text.length * px * 0.6;
+    measureCtx.font = font;
+    return measureCtx.measureText(text).width;
+  }
+
+  /** A label's words in lines no wider than max (a longer word keeps a line of its own). */
+  function wrapWords(text, max, width) {
+    const lines = [];
+    for (const word of String(text).split(/\s+/).filter(Boolean)) {
+      const joined = lines.length ? lines[lines.length - 1] + ' ' + word : null;
+      if (joined != null && width(joined) <= max) lines[lines.length - 1] = joined; else lines.push(word);
+    }
+    return lines;
+  }
+
+  const SPIDER_MAX_R = 128;   // radius of the outer ring at most, in px
+  const SPIDER_MIN_R = 48;    // a smaller chart is too small to read: let it grow taller, or shorten the labels, first
+  /**
+   * Fit the chart to a width: the largest radius whose tactic labels, set just beyond the outer ring, stay inside the
+   * width and a height cap. A label is anchored by the side it is on (centred only on a vertical axis) and its lines
+   * grow away from the chart; one that would come within an em of a label already placed (two names on one line
+   * would read as one) moves further out along its own axis. Labels wrap only when that buys a clearly larger chart.
+   * When even wrapped labels leave too small a chart (very long names, many tactics), the chart may grow taller, and
+   * then the labels are cut short with an ellipsis (the tooltip and the table keep the full names); when nothing fits
+   * (dozens of tactics in a narrow box), fit is false. Boxes are relative to the centre; cx, cy place the centre.
+   */
+  function spiderLayout(axes, W, stacked) {
+    const n = axes.length;
+    const px = stacked || W < 340 ? 11 : 12, lh = Math.round(px * 1.25), gap = 10;   // phones: 11px labels
+    const font = px + 'px ' + getComputedStyle(document.body).fontFamily;
+    const width = s => textWidth(s, font, px);
+    // beside the figure and the key, a height cap keeps the tile compact; stacked under them (phones), the chart may
+    // be as tall as wide, as the width is what limits it there
+    const maxH = stacked ? W : Math.round(Math.min(300, Math.max(260, W * 0.8)));
+    const angle = i => -Math.PI / 2 + (2 * Math.PI * i) / n;
+    const dirs = axes.map((a, i) => [Math.cos(angle(i)), Math.sin(angle(i))]);
+    const box = (L, i, d) => {
+      const [c, s] = dirs[i];
+      const x = d * c, y = d * s;
+      const anchor = Math.abs(c) < 0.05 ? 'middle' : c > 0 ? 'start' : 'end';
+      const left = anchor === 'start' ? x : anchor === 'end' ? x - L.w : x - L.w / 2;
+      const top = anchor === 'middle' ? (s < 0 ? y - L.h : y) : y - L.h / 2 + (s * L.h) / 2;
+      return { anchor, x, top, left, right: left + L.w, bottom: top + L.h };
+    };
+    const overlap = (a, b) => a.left < b.right + px && b.left < a.right + px && a.top < b.bottom + 1 && b.top < a.bottom + 1;
+    const extent = (labels, R) => {
+      const boxes = [];
+      let clash = 0;   // labels that still overlap another after moving out as far as they may
+      labels.forEach((L, i) => {
+        let d = R + gap, b = box(L, i, d);
+        for (let k = 0; k < 40 && boxes.some(o => overlap(o, b)); k++) b = box(L, i, d += 2);
+        if (boxes.some(o => overlap(o, b))) clash++;
+        boxes.push(b);
+      });
+      let x0 = -R - 6, x1 = R + 6, y0 = -R - 6, y1 = R + 6;   // the outer ring's dots
+      for (const b of boxes) { x0 = Math.min(x0, b.left); x1 = Math.max(x1, b.right); y0 = Math.min(y0, b.top); y1 = Math.max(y1, b.bottom); }
+      return { boxes, clash, x0, x1, y0, y1 };
+    };
+    // how badly a layout misses: px beyond the width and the height allowed, and a line's worth per clashing label
+    const miss = (e, maxH) => Math.max(0, e.x1 - e.x0 - (W - 2)) + Math.max(0, e.y1 - e.y0 - maxH) + e.clash * lh;
+    // the largest radius that fits, stepping down 4px then back up 1px (moved labels make the fit uneven in R)
+    const layout = (labels, maxH, short) => {
+      const ok = R => !miss(extent(labels, R), maxH);
+      let R = SPIDER_MAX_R;
+      while (R > 24 && !ok(R)) R -= 4;
+      while (R < SPIDER_MAX_R && ok(R + 1)) R += 1;
+      return { labels, R, short, miss: miss(extent(labels, R), maxH) };
+    };
+    const labelsOf = linesOf => axes.map(a => {
+      const lines = linesOf(a.tactic.name);
+      return { lines, w: Math.max(...lines.map(width)), h: lines.length * lh };
+    });
+    // at most two lines of at most max px; a name that runs on, or a word too long for a line, ends in an ellipsis
+    const shorten = (name, max) => {
+      const lines = wrapWords(name, max, width);
+      const cut = (s, more) => {
+        if (!more && width(s) <= max) return s;
+        const cs = [...s];
+        while (cs.length > 1 && width(cs.join('') + '…') > max) cs.pop();
+        return cs.join('').trimEnd() + '…';
+      };
+      return lines.length <= 2 ? lines.map(s => cut(s, false)) : [cut(lines[0], false), cut(lines[1], true)];
+    };
+    const wraps = [Infinity, 140, 110, 90, 70].map(max => labelsOf(name => wrapWords(name, max, width)));
+    const options = wraps.map(labels => layout(labels, maxH, false));
+    // the first (least wrapped, then least cut) within 10% of the largest chart that fits
+    const nearBest = os => { const best = Math.max(0, ...os.filter(o => !o.miss).map(o => o.R)); return best ? os.find(o => !o.miss && o.R >= best * 0.9) : null; };
+    let pick = nearBest(options);
+    if (!pick || pick.R < SPIDER_MIN_R) {
+      // full names leave too small a chart: let it grow taller, then cut the labels short, the least cut that reaches a
+      // readable size; failing that, the largest chart that fits, else (fit: false) the layout that misses least
+      const tall = Math.max(maxH, Math.min(W, 520));
+      const more = wraps.map(labels => layout(labels, tall, false))
+        .concat([90, 70, 56, 44].map(max => layout(labelsOf(name => shorten(name, max)), tall, true)));
+      const all = options.concat(more);
+      pick = more.find(o => !o.miss && o.R >= SPIDER_MIN_R) || nearBest(all)
+        || all.reduce((m, o) => (o.miss < m.miss || (o.miss === m.miss && o.R > m.R) ? o : m));
+    }
+    const e = extent(pick.labels, pick.R);
+    return { n, px, lh, angle, R: pick.R, labels: pick.labels, boxes: e.boxes, short: pick.short, fit: !pick.miss,
+      W, H: Math.ceil(e.y1 - e.y0) + 2, cx: (W - (e.x1 - e.x0)) / 2 - e.x0, cy: 1 - e.y0 };
+  }
+
+  // the chart on screen: { host, r, axes, w (width drawn for), at (tactic shown), by (what showed it), svg, clear, follow }
+  let spider = null;
+  let spiderWatch = null;   // redraws it when its width changes
+  let tapWatch = false;
+
+  /** Once: a tap outside the chart closes a tooltip that a tap on the chart opened. */
+  function watchTaps() {
+    if (tapWatch) return;
+    tapWatch = true;
+    document.addEventListener('pointerdown', e => {
+      if (e.pointerType !== 'touch' || (e.target.closest && e.target.closest('.sp-svg, .sp-rows'))) return;
+      if (spider && spider.clear) spider.clear();
+      else if (document.querySelector('#kpis .sp-rows')) hideTip();
+    }, { passive: true });
+  }
+
+  function mountSpider(host, r, axes) {
+    const at = spider && spider.r.domain === r.domain && spider.at < axes.length ? spider.at : 0;
+    spider = { host, r, axes, w: 0, at, svg: null, clear: null };
+    if (typeof ResizeObserver === 'function') {
+      // redraw on the next frame, not inside the observer (the new drawing changes the host's height)
+      if (!spiderWatch) spiderWatch = new ResizeObserver(() => requestAnimationFrame(() => {
+        const w = spider && spider.host.isConnected ? Math.round(spider.host.clientWidth) : 0;
+        if (w && w !== spider.w) drawSpider();   // 0: hidden, nothing to fit
+      }));
+      spiderWatch.disconnect();
+      spiderWatch.observe(host);
+    }
+    drawSpider();
+  }
+  function stopSpider() {
+    spider = null;
+    if (spiderWatch) spiderWatch.disconnect();
+  }
+
+  function drawSpider() {
+    const sp = spider;
+    const { host, r, axes } = sp;
+    const hadFocus = !!sp.svg && document.activeElement === sp.svg, wasBy = sp.by;
+    sp.w = Math.round(host.clientWidth);
+    hideTip();
+    const hero = host.closest('.hero');
+    const stacked = !hero || getComputedStyle(hero).gridTemplateColumns.trim().split(/\s+/).length < 2;
+    const g = spiderLayout(axes, Math.max(260, sp.w || 560), stacked);
+    if (!g.fit) {
+      // dozens of tactics in a narrow box: no labelling fits around a spider, so a line per tactic, as for fewer than three
+      host.replaceChildren(spiderRows(r, axes), el('p', { class: 'sp-crowd', text: 'There are too many tactics to label around a spider chart '
+        + 'at this width, so each tactic\'s average is shown on a line from 1 to 3.' }));
+      Object.assign(sp, { svg: null, by: null, clear: hideTip, follow: null });
+      return;
+    }
+    const { n, R, cx, cy, angle } = g;
+    const f = v => v.toFixed(1);
+    const xy = (i, v) => [cx + (R * v / 3) * Math.cos(angle(i)), cy + (R * v / 3) * Math.sin(angle(i))];
+    const points = vals => vals.map((v, i) => xy(i, v).map(f).join(',')).join(' ');
+    const half = Math.PI / n;
+    // a ring is a polygon: halfway between two axes, its side is this much closer to the centre than its corners
+    const sideMid = Math.cos(half);
+    // a slice of the circle around an axis, out to radius out
+    const slice = (i, out) => {
+      const at = a => f(cx + out * Math.cos(a)) + ',' + f(cy + out * Math.sin(a));
+      return 'M' + f(cx) + ',' + f(cy) + ' L' + at(angle(i) - half) + ' A' + f(out) + ',' + f(out) + ' 0 0 1 ' + at(angle(i) + half) + ' Z';
+    };
+    // the shaded band of a hovered axis: its share of the outer ring, from the centre to the middles of the ring's
+    // two sides beside the axis (a slice of the circle would bulge out of the ring on a chart of few tactics)
+    const band = i => {
+      const at = (a, d) => f(cx + d * Math.cos(a)) + ',' + f(cy + d * Math.sin(a));
+      return 'M' + f(cx) + ',' + f(cy) + ' L' + at(angle(i) - half, R * sideMid) + ' L' + at(angle(i), R) + ' L' + at(angle(i) + half, R * sideMid) + ' Z';
+    };
+    // hover slices reach out to the farthest label corner
+    const reach = Math.max(...g.boxes.flatMap(b => [[b.left, b.top], [b.right, b.top], [b.left, b.bottom], [b.right, b.bottom]].map(([x, y]) => Math.hypot(x, y)))) + 4;
+    const ringAt = angle(0) + half;   // ring numbers go between the first two axes, each on its own ring's side
+    const svg = svgEl('svg', {
+      class: 'sp-svg', viewBox: '0 0 ' + g.W + ' ' + g.H, width: g.W, height: g.H, role: 'img', tabindex: '0',
+      'aria-label': spiderSummary(r, axes), 'data-key': 'spider|chart', 'data-cx': cx.toFixed(2), 'data-cy': cy.toFixed(2), 'data-r': R.toFixed(2),
+    },
+      svgEl('g', {}, ...axes.map((a, i) => svgEl('path', { class: 'sp-band', d: band(i), 'data-i': i }))),
+      svgEl('g', {}, ...axes.map((a, i) => { const [x, y] = xy(i, 3); return svgEl('line', { class: 'sp-spoke', x1: f(cx), y1: f(cy), x2: f(x), y2: f(y), 'data-i': i }); })),
+      svgEl('g', {}, ...LEVELS.map(l => svgEl('polygon', { class: 'sp-ring l' + l.n, points: points(axes.map(() => l.n)) }))),
+      svgEl('polygon', { class: 'sp-area', points: points(axes.map(a => a.sum / a.n)) }),
+      svgEl('g', {}, ...axes.map((a, i) => {
+        const [x, y] = xy(i, a.sum / a.n);
+        return svgEl('circle', { class: 'sp-dot l' + levelReached(a), cx: f(x), cy: f(y), r: 4, 'data-i': i });
+      })),
+      // on top of the data, with a halo, so a polygon lying on a ring never hides its number
+      svgEl('g', {}, ...LEVELS.map(l => svgEl('text', {
+        class: 'sp-ringnum', x: f(cx + (R * l.n / 3) * sideMid * Math.cos(ringAt)), y: f(cy + (R * l.n / 3) * sideMid * Math.sin(ringAt)),
+        'text-anchor': 'middle', 'dominant-baseline': 'central',
+      }, String(l.n)))),
+      svgEl('g', { style: 'font-size:' + g.px + 'px' }, ...axes.map((a, i) => {
+        const L = g.labels[i], b = g.boxes[i];
+        return svgEl('text', { class: 'sp-label', 'text-anchor': b.anchor, 'dominant-baseline': 'central', 'data-i': i, 'data-tactic': a.tactic.shortname },
+          ...L.lines.map((line, k) => svgEl('tspan', { x: f(cx + b.x), y: f(cy + b.top + (k + 0.5) * g.lh) }, line)));
+      })),
+      // hover targets: the slice around each axis, then each label's own box (a label set to one side of its axis can
+      // reach into the next slice)
+      svgEl('g', {}, ...axes.map((a, i) => svgEl('path', { class: 'sp-hit', d: slice(i, reach), 'data-i': i })),
+        ...g.boxes.map((b, i) => svgEl('rect', { class: 'sp-hit', x: f(cx + b.left - 2), y: f(cy + b.top - 2), width: f(b.right - b.left + 4), height: f(b.bottom - b.top + 4), 'data-i': i }))),
+    );
+    if (g.short) svg.dataset.short = '1';
+    const live = el('span', { class: 'vh', 'aria-live': 'polite' });
+    const dot = i => svg.querySelector('.sp-dot[data-i="' + i + '"]');
+    const dir = i => [Math.cos(angle(i)), Math.sin(angle(i))];
+    // the rings' box on screen, out to the edge of an enlarged dot on the outer ring: the tooltip keeps off it
+    const plotBox = () => {
+      const s = svg.getBoundingClientRect(), k = s.width / g.W, m = R + 8;
+      return { left: s.left + (cx - m) * k, right: s.left + (cx + m) * k, top: s.top + (cy - m) * k, bottom: s.top + (cy + m) * k };
+    };
+    let place = null;   // where the tooltip went (spiderTip): kept while it follows a scroll, if it still fits there
+    // sp.by: what opened the tactic shown, 'pointer' (a hover or a tap) or 'key' (focus, the arrow keys); null: none
+    const clear = () => {   // runs on every scroll: touches only what is highlighted
+      for (const m of svg.querySelectorAll('.on')) m.classList.remove('on');
+      for (const d of svg.querySelectorAll('.sp-dot[r="6"]')) d.setAttribute('r', '4');
+      sp.by = null;
+      hideTip();
+    };
+    const show = (i, by, announce) => {
+      clear();
+      sp.at = i;
+      sp.by = by;
+      for (const m of svg.querySelectorAll('[data-i="' + i + '"]')) m.classList.add('on');
+      dot(i).setAttribute('r', '6');
+      place = spiderTip(dot(i), axes[i], dir(i), plotBox());
+      if (announce) live.textContent = spiderAxisText(axes[i]);
+    };
+    // A scroll (including the one that brings the chart into view when Tab reaches it) moves the chart under the
+    // fixed tooltip. One the keyboard opened stays with its dot while the chart has focus (hidden while the dot is out
+    // of view); onScroll closes any other, with its highlight. Returns whether it kept the tooltip.
+    let frame = 0;
+    const follow = () => {
+      if (sp.by !== 'key' || document.activeElement !== svg) return false;
+      if (!frame) frame = requestAnimationFrame(() => {
+        frame = 0;
+        if (sp.by !== 'key' || document.activeElement !== svg) return;
+        const b = dot(sp.at).getBoundingClientRect();
+        if (b.bottom < 0 || b.top > innerHeight) hideTip(); else place = spiderTip(dot(sp.at), axes[sp.at], dir(sp.at), plotBox(), place);
+      });
+      return true;
+    };
+    svg.addEventListener('pointerover', e => { const h = e.target.closest('.sp-hit'); if (h) show(Number(h.dataset.i), 'pointer'); });
+    // a finger leaves as soon as it lifts: on touch the tooltip stays until the next tap elsewhere (or a scroll)
+    svg.addEventListener('pointerleave', e => { if (e.pointerType !== 'touch') clear(); });
+    // a click or a tap focuses the chart too, after the pointer has shown its tactic: that focus changes nothing
+    let downAt = -Infinity;
+    svg.addEventListener('pointerdown', () => { downAt = performance.now(); });
+    svg.addEventListener('pointercancel', () => { downAt = -Infinity; });
+    // keyboard: the chart is one Tab stop; the arrow keys move from tactic to tactic
+    svg.addEventListener('focus', () => { if (performance.now() - downAt > 1000) show(sp.at, 'key'); });
+    svg.addEventListener('blur', () => { live.textContent = ''; clear(); });
+    svg.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { clear(); return; }
+      const j = { ArrowRight: sp.at + 1, ArrowDown: sp.at + 1, ArrowLeft: sp.at - 1, ArrowUp: sp.at - 1, Home: 0, End: n - 1 }[e.key];
+      if (j == null) return;
+      e.preventDefault();
+      show((j + n) % n, 'key', true);
+    });
+    host.replaceChildren(svg, live);
+    sp.svg = svg;
+    sp.clear = clear;
+    sp.follow = follow;
+    if (hadFocus) {   // redrawn for a new width: the new drawing keeps the focus, and shows a tooltip only if one was open
+      svg.focus({ preventScroll: true });
+      if (wasBy !== 'key') clear();
+    }
+  }
+
+  /**
+   * The window scrolled: the tooltip (fixed in place) would point at the wrong thing. Close it, and the chart's
+   * highlight with it, unless it is the one the keyboard opened on the focused chart: that one follows the chart.
+   */
+  function onScroll() {
+    if (spider && spider.follow && spider.follow()) return;
+    if (spider && spider.clear) spider.clear(); else hideTip();
   }
 
   /** Distinct controls or CVEs over all results; null (no count shown) when no result has the mapping. */
@@ -936,6 +1511,7 @@
       mappingTipRow(r, techId),
       t ? el('div', { class: 'row', text: 'Coverage: ' + STATUS[t.status].label }) : null,
     );
+    delete tip.dataset.of;   // a matrix cell's, not the coverage chart's
     tip.hidden = false;
     const a = anchor.getBoundingClientRect();
     const w = tip.offsetWidth, h = tip.offsetHeight;
@@ -945,7 +1521,7 @@
     tip.style.left = x + 'px';
     tip.style.top = Math.max(8, y) + 'px';
   }
-  function hideTip() { $('#tip').hidden = true; }
+  function hideTip() { const tip = $('#tip'); tip.hidden = true; delete tip.dataset.of; }
 
   /** "NIST 800-53: 12 controls · KEV: 3 CVEs" for a matrix cell, from the indexes (used or not). */
   function mappingTipRow(r, techId) {
@@ -2133,8 +2709,11 @@
     $('#exportNavigator').addEventListener('click', exportLayers);
 
     $('#scrim').addEventListener('click', closeDrawer);
-    document.addEventListener('keydown', e => { if (e.key === 'Escape' && drawerBuilder) closeDrawer(); });
-    window.addEventListener('scroll', hideTip, { passive: true });
+    document.addEventListener('keydown', e => {
+      if (e.key !== 'Escape') return;
+      if (drawerBuilder) closeDrawer(); else closeSpiderTip();
+    });
+    window.addEventListener('scroll', onScroll, { passive: true });
 
     renderDomains();
     renderPlatforms();

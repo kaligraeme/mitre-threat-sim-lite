@@ -18,6 +18,7 @@
     --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
     --status-ink-on-warning: #0b0b0b;
     --cell-idle: var(--surface-2);
+    --series-1: #2a78d6;   /* the coverage chart's one series (categorical slot 1) */
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -27,6 +28,7 @@
       --seq-4: #2a78d6; --seq-ink-4: #ffffff;
       --seq-5: #6da7ec; --seq-ink-5: #0b0b0b;
       --seq-6: #9ec5f4; --seq-ink-6: #0b0b0b;
+      --series-1: #3987e5;
     }
   }
   :root[data-theme="dark"] {
@@ -36,6 +38,7 @@
     --seq-4: #2a78d6; --seq-ink-4: #ffffff;
     --seq-5: #6da7ec; --seq-ink-5: #0b0b0b;
     --seq-6: #9ec5f4; --seq-ink-6: #0b0b0b;
+    --series-1: #3987e5;
   }
 
   .wrap.wide { max-width: 1600px; }
@@ -92,18 +95,101 @@
   .chip .nm { cursor: pointer; }
   .chip .nm:hover { text-decoration: underline; }
 
-  .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(0, 1.6fr); gap: 12px; margin-bottom: 16px; }
-  @media (max-width: 1250px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } .kpis .hero { grid-column: 1 / -1; } }
+  /* KPI tiles two by two, the coverage tile on a row of its own below them (four tiles in a row from 720px); from
+     920px the four tiles sit two by two beside the coverage tile. In the coverage tile the headline figure comes
+     first, then the spider chart, then the chart's key; from 560px the figure and the key sit to the left of the chart */
+  .kpis-wrap { container: kpis / inline-size; margin-bottom: 16px; }
+  .kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .kpis .hero { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-areas: "head" "chart" "key";
+                gap: 12px 28px; }
+  .kpis .hero-head { grid-area: head; min-width: 0; }
+  .kpis .hero .spider { grid-area: chart; }
+  .kpis .hero .sp-key { grid-area: key; min-width: 0; }
+  @container kpis (min-width: 560px) {
+    .kpis .hero { grid-template-columns: minmax(180px, .9fr) minmax(0, 2fr); grid-template-rows: auto 1fr; grid-template-areas: "head chart" "key chart"; }
+  }
+  @container kpis (min-width: 720px) {
+    .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .kpis .hero { grid-template-columns: minmax(210px, 1fr) minmax(0, 2.5fr); }
+  }
+  @container kpis (min-width: 920px) {
+    .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)) minmax(0, 4fr); }
+    .kpis .hero { grid-column: 3; grid-row: 1 / span 2; grid-template-columns: minmax(200px, 1fr) minmax(0, 2.2fr); }
+  }
   .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
   .tile .lbl { color: var(--muted); font-size: 13px; }
   .tile .val { font-size: 28px; font-weight: 600; line-height: 1.2; margin-top: 2px; }
   .tile .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
-  .hero .val { font-size: 40px; }
-  .hero .val small { font-size: 16px; font-weight: 500; color: var(--muted); margin-left: 6px; }
-  .stack { display: flex; height: 10px; border-radius: 4px; overflow: hidden; gap: 2px; margin: 10px 0 8px; background: var(--surface-2); }
-  .stack > span { display: block; height: 100%; min-width: 0; }
+  .hero .val { font-size: 40px; display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 6px; }
+  .hero .val small { font-size: 16px; font-weight: 500; color: var(--muted); }
   .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
-  .legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+  /* the spider chart: coverage level per tactic (rings 1-3), one series */
+  .sp-key ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+  .sp-key li { display: flex; align-items: center; gap: 8px; }
+  .sp-key .sp-icons { min-width: 36px; }
+  /* forced colours (Windows high contrast) keep the chart's ring and dot colours: keep the key's too, so they match */
+  .sp-key .stat-badge, .sp-track { forced-color-adjust: none; }
+  .sp-how { margin-top: 10px; font-size: 12px; color: var(--muted); }
+  .sp-how summary { cursor: pointer; font-size: 12.5px; width: fit-content; }
+  .sp-how p { margin: 6px 0 0; max-width: 48ch; }
+  .spider { margin: 0; min-width: 0; }
+  .sp-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 13px; }
+  .sp-title { font-weight: 600; }
+  .sp-domain { color: var(--muted); }
+  .sp-head .seg button { padding: 3px 10px; font-size: 13px; }
+  .sp-foot { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 12px; margin-top: 4px; }
+  .sp-foot .sp-notes { flex: 1 1 220px; min-width: 0; }
+  .sp-btn { flex: none; padding: 3px 10px; font-size: 13px; }
+  .sp-btn[aria-pressed="true"] { background: var(--surface-2); font-weight: 600; }
+  .sp-plot { margin-top: 8px; }
+  .sp-svg { display: block; width: 100%; height: auto; }
+  .sp-svg:focus { outline: none; }
+  .sp-svg:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
+  .sp-band { fill: transparent; }
+  .sp-band.on { fill: var(--text); fill-opacity: .06; }
+  .sp-spoke { stroke: var(--border); stroke-width: 1; }
+  .sp-spoke.on { stroke: var(--muted); }
+  .sp-ring { fill: none; stroke-width: 1.5; stroke-linejoin: round; }
+  .sp-ring.l1 { stroke: var(--critical); } .sp-ring.l2 { stroke: var(--warning); } .sp-ring.l3 { stroke: var(--good); }
+  .sp-ringnum { fill: var(--muted); font-size: 10.5px; font-weight: 600; paint-order: stroke; stroke: var(--surface); stroke-width: 3px; stroke-linejoin: round; }
+  .sp-area { fill: var(--series-1); fill-opacity: .1; stroke: var(--series-1); stroke-width: 2; stroke-linejoin: round; }
+  .sp-dot { stroke: var(--surface); stroke-width: 2; }
+  .sp-dot.l1 { fill: var(--critical); } .sp-dot.l2 { fill: var(--warning); } .sp-dot.l3 { fill: var(--good); }
+  .sp-label { fill: var(--text); }
+  .sp-label.on { text-decoration: underline; }
+  .sp-hit { fill: transparent; }
+  .sp-notes { font-size: 12px; color: var(--muted); }
+  .sp-notes p { margin: 0; }
+  .sp-notes p + p { margin-top: 4px; }
+  .sp-crowd { margin: 0 0 6px; font-size: 12px; color: var(--muted); }
+  .spider .sp-table-wrap:not(.vh) { margin-top: 10px; }
+  /* wider than a phone the table has a row of its own under the KPI tiles, as wide as all of them (simulator.js moves
+     it there from under the chart), looking like a tile */
+  .kpis > .sp-table-wrap { grid-column: 1 / -1; min-width: 0; }
+  .kpis > .sp-table-wrap:not(.vh) { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+  .kpis > .sp-table-wrap .sp-table { width: auto; }   /* six columns read better at their own width than spread over the row */
+  /* while hidden, the table's sideways scroller must not scroll: a scroller is a Tab stop, and this one is invisible */
+  .sp-table-wrap.vh .table-scroll { overflow: visible; }
+  .sp-table { font-size: 13px; }
+  .sp-table-note { margin: 0 0 6px; font-size: 12px; color: var(--muted); }
+  .sp-table tbody th { color: var(--text); font-weight: 400; }
+  .tip .tip-val { color: var(--text); font-size: 14px; }
+  /* fewer than three tactics: a dot per tactic on a 1-3 line */
+  .sp-rows { display: grid; grid-template-columns: minmax(0, max-content) minmax(120px, 1fr) auto; align-items: center; gap: 8px 12px;
+             font-size: 13px; margin: 10px 0 6px; }
+  .sp-row { display: contents; }
+  .sp-scale { position: relative; height: 14px; margin: 0 6px; font-size: 11px; font-weight: 600; color: var(--muted); }
+  .sp-scale span { position: absolute; top: 0; transform: translateX(-50%); }
+  .sp-scale .l1 { left: 0; } .sp-scale .l2 { left: 50%; } .sp-scale .l3 { left: 100%; }
+  .sp-row-name { overflow-wrap: anywhere; }
+  .sp-track { position: relative; height: 18px; margin: 0 6px; }
+  .sp-track::before { content: ""; position: absolute; left: 0; right: 0; top: 8px; height: 2px; background: var(--border); }
+  .sp-tick { position: absolute; top: 3px; width: 2px; height: 12px; margin-left: -1px; border-radius: 1px; }
+  .sp-tick.l1 { left: 0; background: var(--critical); } .sp-tick.l2 { left: 50%; background: var(--warning); } .sp-tick.l3 { left: 100%; background: var(--good); }
+  .sp-mark { position: absolute; top: 3px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; box-shadow: 0 0 0 2px var(--surface); }
+  .sp-mark.l1 { background: var(--critical); } .sp-mark.l2 { background: var(--warning); } .sp-mark.l3 { background: var(--good); }
+  .sp-row-val { font-variant-numeric: tabular-nums; }
 
   /* eight tabs on one row at 1280px (results column about 868px): 14px labels, compact padding, short labels for the
      mapping tabs. Narrower screens wrap the row so every tab stays visible; from 1280px up (where it fits even for
@@ -197,9 +283,9 @@
   .empty-state h2 { color: var(--text); font-size: 18px; }
   .examples { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 14px; }
 
-  /* tooltip */
+  /* tooltip (in a window under 336px, narrower than the window, so it keeps 8px clear of both edges) */
   .tip { position: fixed; z-index: 50; pointer-events: none; background: var(--surface); color: var(--text); border: 1px solid var(--border);
-         border-radius: 8px; padding: 8px 10px; font-size: 12.5px; max-width: 320px; box-shadow: 0 6px 24px rgba(0,0,0,.18); }
+         border-radius: 8px; padding: 8px 10px; font-size: 12.5px; max-width: min(320px, 100vw - 16px); box-shadow: 0 6px 24px rgba(0,0,0,.18); }
   .tip b { display: block; font-size: 13px; }
   .tip .row { color: var(--muted); }
 
@@ -349,7 +435,7 @@
       </div>
 
       <div id="analysis" hidden>
-        <div class="kpis" id="kpis"></div>
+        <div class="kpis-wrap"><div class="kpis" id="kpis"></div></div>
 
         <div class="tabs" role="tablist" id="tabs"></div>
         <div id="tabTools" class="tab-tools"></div>
