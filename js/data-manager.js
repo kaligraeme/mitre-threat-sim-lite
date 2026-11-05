@@ -56,9 +56,16 @@
     return new Set(defaults);
   }
   function saveSelected() {
+    // ids this page doesn't offer (another ThreatSim build's, saved in this browser) stay known, so that build
+    // keeps the choice made for them
+    let known = [];
+    try {
+      const v = JSON.parse(localStorage.getItem(KNOWN_KEY));
+      if (Array.isArray(v)) known = v.filter(id => typeof id === 'string');
+    } catch (_) {}
     try {
       localStorage.setItem(SELECTED_KEY, JSON.stringify([...state.selected]));
-      localStorage.setItem(KNOWN_KEY, JSON.stringify([...AttackDB.DOMAINS, ...MAPS].map(d => d.id)));
+      localStorage.setItem(KNOWN_KEY, JSON.stringify([...new Set([...known, ...[...AttackDB.DOMAINS, ...MAPS].map(d => d.id)])]));
     } catch (_) {}
   }
 

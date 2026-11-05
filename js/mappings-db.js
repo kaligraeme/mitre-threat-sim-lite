@@ -279,8 +279,10 @@
 
   // GitHub allows 60 unauthenticated API calls an hour per address, shared by everything behind it: the Data
   // page reuses a listing it read recently (only the paths that matter, in this browser's localStorage), and
-  // falls back to the last listing it read, whatever its age, when GitHub can't be asked
-  const LISTING_KEY = 'threatsim.ctidListing';
+  // falls back to the last listing it read, whatever its age, when GitHub can't be asked. The key is this
+  // edition's own: a ThreatSim build with more sources keeps its longer copy under 'threatsim.ctidListing', and
+  // would take this one for GitHub's whole listing
+  const LISTING_KEY = 'threatsim.ctidListing.lite';
   const relevant = p => p === DESCRIPTIONS_PATH || NIST_RE.test(p);
   const validEntry = e => isObj(e) && typeof e.path === 'string' && relevant(e.path);
 

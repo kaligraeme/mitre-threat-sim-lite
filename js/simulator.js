@@ -234,6 +234,8 @@
 
   // Workbook export progress, reflected on the static export toolbar by syncExportUi().
   const exportUi = { busy: false, msg: '', err: false };
+  // ui settings this page doesn't have (another ThreatSim build's, saved in this browser) are saved again as read
+  const OWN_UI = new Set(Object.keys(state.ui));
 
   function persist() {
     const s = {
@@ -242,7 +244,8 @@
       selection: Object.fromEntries(Object.entries(state.selection).map(([k, v]) => [k, [...v]])),
       opts: { viaSoftware: state.opts.viaSoftware, viaCampaigns: state.opts.viaCampaigns, platforms: [...state.opts.platforms] },
       inPlace: { mitigations: [...state.inPlace.mitigations], detections: [...state.inPlace.detections] },
-      ui: { pickFamily: state.ui.pickFamily, pickTab: state.ui.pickTab, lastTab: state.ui.lastTab, tab: state.ui.tab,
+      ui: { ...Object.fromEntries(Object.entries(state.ui).filter(([k]) => !OWN_UI.has(k))),
+            pickFamily: state.ui.pickFamily, pickTab: state.ui.pickTab, lastTab: state.ui.lastTab, tab: state.ui.tab,
             colorMode: state.ui.colorMode, showAll: state.ui.showAll, matrixDomain: state.ui.matrixDomain, matchDesc: state.ui.matchDesc,
             spiderDomain: state.ui.spiderDomain, spiderTable: state.ui.spiderTable, spiderHow: state.ui.spiderHow },
     };
@@ -593,7 +596,7 @@
         });
         return el('label', {}, cb, p);
       }),
-    ]));
+    ]).filter(Boolean));   // no heading with one knowledge base
     renderPlatformSummary();
   }
 
@@ -1493,13 +1496,14 @@
     const tip = $('#tip');
     const mitN = r.model.to(techId, 'mitigates').length;
     const detN = r.model.to(techId, 'detects').length;
-    tip.replaceChildren(
+    // no row for a mapping the domain lacks or the coverage of a technique the profile doesn't use
+    tip.replaceChildren(...[
       el('b', { text: tech.attackId + ' ' + tech.name }),
       t ? el('div', { class: 'row', text: 'Used by ' + t.roots.size + ': ' + rootNames(t) }) : el('div', { class: 'row', text: 'Not used by this profile' }),
       el('div', { class: 'row', text: mitN + ' mitigations · ' + detN + ' detection strategies' }),
       mappingTipRow(r, techId),
       t ? el('div', { class: 'row', text: 'Coverage: ' + STATUS[t.status].label }) : null,
-    );
+    ].filter(Boolean));
     delete tip.dataset.of;   // a matrix cell's, not the coverage chart's
     tip.hidden = false;
     const a = anchor.getBoundingClientRect();

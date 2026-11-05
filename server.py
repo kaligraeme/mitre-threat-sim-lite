@@ -51,7 +51,7 @@ LOCK_MAX = 15 * 60                # ... up to this,
 QUIET_RESET = 3600                # ... until this long passes without a wrong password
 MIN_PASSWORD = 8                  # characters (Unicode code points)
 MAX_FIELD = 1024                  # longest username or password accepted
-MAX_BODY = 16 * 1024              # largest request body accepted (sign-in, password change)
+MAX_BODY = 16 * 1024              # largest request body accepted
 MAX_CONNECTIONS = 128             # open connections at once; more are dropped
 PAGES = ('index.html', 'simulator.html')               # signed-in pages sign-in may return to
 PUBLIC = {'login.html', 'css/app.css', 'js/login.js'}  # served without a session
@@ -542,7 +542,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         value = values[0].strip()
         return int(value) if LENGTH_RE.fullmatch(value) else -1
 
-    def read_body(self, limit=MAX_BODY):
+    def read_body(self):
         """The request body as bytes, or None after replying with an error."""
         n = self.body_length()
         if n is None:
@@ -551,7 +551,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             self.reply(400, 'Send the body with one plain Content-Length.')
             return None
-        if n > limit:
+        if n > MAX_BODY:
             self.close_connection = True
             self.reply(413, 'Request too large.')
             return None

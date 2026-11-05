@@ -12,6 +12,8 @@
   #mappingSource { margin: 0 0 12px; max-width: 80ch; }
   #mappingSource a { color: inherit; }
   #mappingCountsWrap { margin-top: 12px; }
+  /* a lone mapping card is as wide as a knowledge-base card, not the whole row */
+  #mappingCards { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
   /* long version labels: the picker shrinks with the card instead of widening the page */
   #mappingCards dl.kv dd { min-width: 0; }
   #mappingCards select { max-width: 100%; }
