@@ -191,8 +191,8 @@
   .sp-mark.l1 { background: var(--critical); } .sp-mark.l2 { background: var(--warning); } .sp-mark.l3 { background: var(--good); }
   .sp-row-val { font-variant-numeric: tabular-nums; }
 
-  /* eight tabs on one row at 1280px (results column about 868px): 14px labels, compact padding, short labels for the
-     mapping tabs. Narrower screens wrap the row so every tab stays visible; from 1280px up (where it fits even for
+  /* seven tabs on one row at 1280px (results column about 868px): 14px labels, compact padding, a short label for the
+     800-53 tab. Narrower screens wrap the row so every tab stays visible; from 1280px up (where it fits even for
      the largest profiles) it never wraps, and scrolls sideways in the rare case it is still too wide */
   .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 12px; flex-wrap: wrap; }
   @media (min-width: 1280px) { .tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; } }
@@ -321,12 +321,9 @@
   .drawer ul.refs li { margin: 2px 0; }
   .linkish { background: none; border: none; padding: 0; color: var(--accent); text-decoration: underline; cursor: pointer; font: inherit; text-align: left; }
   .linkish.mono { font-family: var(--mono); font-size: 13px; }
-  /* a table cell that opens the drawer: reads as text, underlined on hover and focus */
-  .cellbtn { background: none; border: none; padding: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; border-radius: 0; }
-  button.cellbtn:hover:not(:disabled), button.cellbtn:focus-visible { text-decoration: underline; background: none; }
   .data td .mono { white-space: nowrap; }
 
-  /* NIST 800-53 and KEV (CTID mappings) */
+  /* NIST 800-53 (CTID mappings) */
   .map-cover { margin: 0 0 8px; }
   details.mapnote { margin: 0 0 10px; font-size: 13px; }
   details.mapnote summary { cursor: pointer; color: var(--muted); }
@@ -340,7 +337,6 @@
   .drawer .note-line { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; margin-top: 4px; }
   .drawer .note-line .md, .drawer .note-line .kicker { flex: 1 1 100%; }
   .drawer .muted { color: var(--muted); }
-  .drawer .small { font-size: 12px; }
   .drawer .small-print { margin-top: 20px; font-size: 12px; color: var(--muted); }
   .toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); white-space: nowrap; }
 </style>
@@ -352,7 +348,6 @@
     <nav>
       <a href="index.html">Data</a>
       <a href="simulator.html" aria-current="page">Threat Profile</a>
-      <a href="threatmodel.html">Threat Modelling</a>
     </nav>
   </div>
 </header>
@@ -419,7 +414,7 @@
         <div class="export-bar" id="exportBar" role="toolbar" aria-label="Export" hidden>
           <div class="export-buttons">
             <button class="primary" id="exportWorkpaper" aria-disabled="false"
-              title="Excel workpaper (.xlsx): executive summary, matrix, techniques, mitigations, detections, ICS assets, telemetry and analytics, NIST 800-53 controls and known exploited CVEs, with editable statuses">Export workpaper</button>
+              title="Excel workpaper (.xlsx): executive summary, matrix, techniques, mitigations, detections, ICS assets, telemetry, analytics and NIST 800-53 controls, with editable statuses">Export workpaper</button>
             <button id="exportCsv" title="Techniques with their mitigations, detections and coverage (.csv)">CSV</button>
             <button id="exportNavigator" title="Layer for MITRE ATT&amp;CK Navigator (ATLAS Navigator for ATLAS), one JSON file per domain">Navigator</button>
           </div>

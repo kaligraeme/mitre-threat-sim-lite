@@ -4,8 +4,8 @@
  * Global `Workpaper`. Builds an .xlsx with ExcelJS (vendored in js/vendor and
  * loaded on first use) with these sheets: Executive Summary, one Matrix sheet
  * per domain, Techniques, Mitigations, Detections, ICS Assets, Telemetry,
- * Analytics, Control Map, NIST 800-53 and Known Exploited CVEs. The last two come
- * from CTID's Mappings Explorer (r.nist and r.kev, set by SimEngine.mapExternal).
+ * Analytics, Control Map and NIST 800-53. The last comes from CTID's Mappings
+ * Explorer (r.nist, set by SimEngine.mapExternal).
  *
  * The status cells on Mitigations and Detections are drop-down inputs. Every
  * figure that depends on them — technique coverage, the readiness bars, matrix
@@ -26,12 +26,10 @@
   const SHEET = {
     summary: 'Executive Summary', techniques: 'Techniques', mitigations: 'Mitigations', detections: 'Detections',
     assets: 'ICS Assets', telemetry: 'Telemetry', analytics: 'Analytics', map: 'Control Map',
-    nist: 'NIST 800-53', cves: 'Known Exploited CVEs',
+    nist: 'NIST 800-53',
   };
-  // CTID Mappings Explorer sources (MappingsDB ids) and the KEV roles a technique can play for a CVE
-  const NIST_SOURCE = 'nist-800-53-r5', KEV_SOURCE = 'kev';
-  const KEV_ROLE = { exploitation_technique: 'Exploitation technique', primary_impact: 'Primary impact', secondary_impact: 'Secondary impact', uncategorized: 'Uncategorized' };
-  const KEV_ROLE_ORDER = Object.keys(KEV_ROLE);
+  // CTID Mappings Explorer source (MappingsDB id)
+  const NIST_SOURCE = 'nist-800-53-r5';
   // Why an Enterprise profile technique has no 800-53 control (Techniques sheet): CTID judged it, or CTID's mapping
   // has no row for it at all (some of those were added to ATT&CK after the release CTID mapped)
   const NO_CONTROL = {
@@ -90,7 +88,7 @@
     { key: 'tacticKeys', header: 'Tactic keys', helper: true },
     { key: 'assetKeys', header: 'Asset keys', helper: true },
     { key: 'code', header: 'Coverage code (live)', helper: true },
-    { key: 'nistKeys', header: 'NIST control keys', helper: true },   // ';Enterprise:AC-2;…;' (no CVE keys: T1190 alone would overflow a cell)
+    { key: 'nistKeys', header: 'NIST control keys', helper: true },   // ';Enterprise:AC-2;…;'
   ];
 
   // Shared by Mitigations and Detections: the inputs sit right after the name so they stay in view.
@@ -209,22 +207,6 @@
     { key: 'mits', header: 'Related ATT&CK mitigations (shared profile techniques, most first)', width: 60, noPrint: true },
     { key: 'comments', header: 'CTID comments', width: 80, noPrint: true },
     { key: 'key', header: 'Key', helper: true },
-  ];
-
-  // One row per CVE, role and profile technique (KEV maps Enterprise and Mobile ATT&CK).
-  const KEV_COLS = [
-    { key: 'domain', header: 'Domain', width: 11 },
-    { key: 'id', header: 'CVE ID', width: 15, link: true },
-    { key: 'name', header: 'Vulnerability', width: 38, wrap: true },
-    { key: 'type', header: 'Vulnerability type', width: 16, wrap: true },
-    { key: 'role', header: 'Role of the technique', width: 15, wrap: true },
-    { key: 'techId', header: 'Technique ID', width: 12, link: true },
-    { key: 'tech', header: 'Technique', width: 28, wrap: true },
-    { key: 'coverage', header: 'Coverage (live)', width: 21, live: true },
-    { key: 'comments', header: 'CTID comment', width: 80, noPrint: true },
-    { key: 'references', header: 'References', width: 60, noPrint: true },
-    { key: 'techKey', header: 'Technique key', helper: true },
-    { key: 'cveKey', header: 'CVE key', helper: true },
   ];
 
   // ---------- small helpers ----------
@@ -386,11 +368,11 @@
 
   function prepare(ctx) {
     const P = { domains: [], techniques: [], mitigations: [], detections: [], assets: [], telemetry: [], analytics: [], map: [], profile: [],
-      nist: [], kev: [], unresolved: new Set() };
+      nist: [], unresolved: new Set() };
     const generated = ctx.generatedAt || new Date();
     // CTID mappings pulled when the workbook was exported (provenance from the simulator's ctx.mappings)
     const pulled = id => (Array.isArray(ctx.mappings) ? ctx.mappings : []).find(x => x && x.source === id) || null;
-    P.mappings = { nist: pulled(NIST_SOURCE), kev: pulled(KEV_SOURCE) };
+    P.mappings = { nist: pulled(NIST_SOURCE) };
     // the ATT&CK release CTID's NIST mapping targets, and whether a technique was added to ATT&CK after it
     const nistVersion = P.mappings.nist && P.mappings.nist.attackVersion ? String(P.mappings.nist.attackVersion) : '';
     const addedAfter = tech => global.SimEngine.addedAfterRelease(tech, nistVersion);
@@ -421,7 +403,7 @@
         dcTotal: r.dataComponents.size, assetTotal: r.assets.size,
         topMitigations: [], topDetections: [], tierCounts: { mit: new Map(), det: new Map() },
         // CTID mappings joined by SimEngine.mapExternal (null when not pulled or not this domain)
-        nist: r.nist || null, kev: r.kev || null, mappingStatus: r.mappingStatus || {},
+        nist: r.nist || null, mappingStatus: r.mappingStatus || {},
         noControl: { judged: 0, absent: 0, late: 0 },   // profile techniques with no 800-53 control, by NO_CONTROL reason
       };
       for (const t of techList) {
@@ -664,43 +646,6 @@
         }
       }
 
-      // Known exploited CVEs: one row per CVE, role and profile technique, CVEs in the simulator's order
-      if (D.kev) {
-        const roleRank = type => (KEV_ROLE_ORDER.includes(type) ? KEV_ROLE_ORDER.indexOf(type) : KEV_ROLE_ORDER.length);
-        // CTID's comment for one CVE, technique and role (the index keeps one entry per capability and role)
-        const roleNote = (cveId, techId, type) => {
-          const e = (D.kev.index.byTech.get(techId) || []).find(x => x.capId === cveId && (x.type || null) === type);
-          return e && e.comments ? e.comments : '';
-        };
-        for (const [cveId, c] of D.kev.cves) {
-          const pairs = [];
-          for (const tid of c.techniques) {
-            const tech = m.byId.get(tid);
-            if (!tech || !r.techniques.has(tid)) continue;
-            const types = [...(c.roles.get(tid) || [])];
-            for (const type of types.length ? types : [null]) pairs.push({ tech, type });
-          }
-          pairs.sort((a, b) => roleRank(a.type) - roleRank(b.type) || byAttackId(a.tech, b.tech));
-          for (const { tech, type } of pairs) {
-            P.kev.push({
-              D, domain: label,
-              id: link(cveId, /^https?:\/\//.test(c.obj.url || '') ? c.obj.url : null),
-              cve: clean(cveId),
-              name: clean(c.obj.name),
-              type: clean(c.obj.typeName || c.obj.type),
-              role: type ? KEV_ROLE[type] || clean(type) : 'Not given',
-              techId: link(tech.attackId || tech.id, tech.url),
-              tech: clean(tech.name),
-              status: r.techniques.get(tech.id).status,
-              comments: ctidText(roleNote(cveId, tech.id, type) || (type ? '' : c.notes.get(tech.id) || '')),
-              references: clean((c.references || []).filter(u => /^https?:\/\//i.test(u)).join(' ')),
-              techKey: keyOf(tech),
-              cveKey: label + ':' + safeKey(cveId),
-            });
-          }
-        }
-      }
-
       for (const [, e] of [...r.dataComponents].sort((a, b) => b[1].techniques.size - a[1].techniques.size || byAttackId(a[1].obj, b[1].obj))) {
         const names = [...e.logSources.keys()].sort();
         const details = names.map(n => {
@@ -771,17 +716,17 @@
 
   // ---------- CTID mappings: scope and empty-sheet notes ----------
 
-  // ATT&CK domains each CTID mapping covers (as SimEngine.MAPPING_SOURCES)
-  const MAPPED_DOMAINS = { nist: ['enterprise-attack'], kev: ['enterprise-attack', 'mobile-attack'] };
-  const MAPPING_NAME = { nist: 'NIST SP 800-53 Rev 5', kev: 'CISA KEV' };
+  // ATT&CK domains the CTID mapping covers (as SimEngine.MAPPING_SOURCES)
+  const MAPPED_DOMAINS = { nist: ['enterprise-attack'] };
+  const MAPPING_NAME = { nist: 'NIST SP 800-53 Rev 5' };
   /** Profile domains with techniques that a mapping covers. */
   const mappedDomains = (P, key) => P.domains.filter(D => MAPPED_DOMAINS[key].includes(D.domain) && D.total);
   const notPulledNote = key => `The ${MAPPING_NAME[key]} mappings were not pulled when this workpaper was exported. `
-    + 'Pull the control and vulnerability mappings (CTID) on ThreatSim\'s Data page, then export again.';
-  /** A pulled mapping's version label without the dataset's name ('28 Jul 2025 · ATT&CK 16.1', 'ATT&CK 16.1'). */
+    + 'Pull the control mappings (CTID) on ThreatSim\'s Data page, then export again.';
+  /** A pulled mapping's version label without the dataset's name ('ATT&CK 16.1'). */
   const versionLabel = (P, key) => {
     const label = String((P.mappings[key] || {}).label || '');
-    return (key === 'kev' ? label.replace(/^KEV catalog of /i, '') : label.replace(/^Rev 5 · /i, '')) || label;
+    return label.replace(/^Rev 5 · /i, '') || label;
   };
   /** -1, 0 or 1: ATT&CK release numbers compared part by part ('16.1' < '20.0'; '20' == '20.0'). */
   const cmpVersion = (a, b) => {
@@ -792,8 +737,8 @@
     }
     return 0;
   };
-  /** The mapping keys ('nist', 'kev') with rows for at least one of the profile's domains. */
-  const usedMappings = P => ['nist', 'kev'].filter(k => P.domains.some(D => D[k]));
+  /** The mapping keys ('nist') with rows for at least one of the profile's domains. */
+  const usedMappings = P => ['nist'].filter(k => P.domains.some(D => D[k]));
 
   /**
    * Why the profile techniques with no 800-53 control have none, in sentences: CTID judged them not mappable, or they
@@ -814,29 +759,23 @@
     return out.join(' ');
   }
 
-  /** Why the NIST 800-53 or Known Exploited CVEs sheet has no rows (null when it has some). */
+  /** Why the NIST 800-53 sheet has no rows (null when it has some). */
   function mappingNotes(P) {
     const note = key => {
-      if ((key === 'nist' ? P.nist : P.kev).length) return null;
+      if (P.nist.length) return null;
       const inScope = mappedDomains(P, key);
       const meta = P.mappings[key];
-      if (!inScope.length) {
-        return key === 'nist' ? 'CTID maps NIST SP 800-53 Rev 5 controls to Enterprise ATT&CK only, and this threat profile has no Enterprise ATT&CK techniques.'
-          : 'CTID maps the known exploited CVEs of CISA\'s KEV catalog to Enterprise and Mobile ATT&CK only, and this threat profile has techniques in neither.';
-      }
+      if (!inScope.length) return 'CTID maps NIST SP 800-53 Rev 5 controls to Enterprise ATT&CK only, and this threat profile has no Enterprise ATT&CK techniques.';
       const shown = inScope.filter(D => D[key]);
       if (!meta || (!shown.length && !inScope.some(D => D.mappingStatus[key] === 'no-attack-data'))) return notPulledNote(key);
       if (!shown.length) return `The pulled ${MAPPING_NAME[key]} mappings (${versionLabel(P, key)}) have no entries for ${inScope.map(D => D.title).join(' or ')}.`;
-      if (key === 'nist') {
-        const total = shown.reduce((n, D) => n + D.total, 0);
-        const c = { none: total, judged: 0, absent: 0, late: 0 };
-        for (const D of shown) for (const k of ['judged', 'absent', 'late']) c[k] += D.noControl[k];
-        return `No NIST SP 800-53 Rev 5 control in CTID's mapping (${versionLabel(P, key)}) mitigates any of this threat profile's `
-          + `${plural(total, 'Enterprise technique', 'Enterprise techniques')}. ` + noControlText(P, c);
-      }
-      return `None of the CVEs in CTID's mapping of CISA's KEV catalog (${versionLabel(P, 'kev')}) is exploited with, or leads to, a technique of this threat profile.`;
+      const total = shown.reduce((n, D) => n + D.total, 0);
+      const c = { none: total, judged: 0, absent: 0, late: 0 };
+      for (const D of shown) for (const k of ['judged', 'absent', 'late']) c[k] += D.noControl[k];
+      return `No NIST SP 800-53 Rev 5 control in CTID's mapping (${versionLabel(P, key)}) mitigates any of this threat profile's `
+        + `${plural(total, 'Enterprise technique', 'Enterprise techniques')}. ` + noControlText(P, c);
     };
-    return { nist: note('nist'), kev: note('kev') };
+    return { nist: note('nist') };
   }
 
   // ---------- generic table writer ----------
@@ -1074,15 +1013,6 @@
     });
   }
 
-  function writeCves(ws, P, L, LT) {
-    const rows = P.kev.map(row => Object.assign({}, row, {
-      coverage: rn => F(`IFERROR(INDEX(${LT.range('coverage')},MATCH($${L.letter('techKey')}${rn},${LT.range('key')},0)),"")`, COVERAGE[row.status]),
-    }));
-    writeTable(ws, L, rows, { freezeCols: 2, emptyNote: P.mappingNotes.kev, fitToWidth: 1 });
-    const cov = L.letter('coverage');
-    coverageRules(ws, `${cov}2:${cov}${L.last}`, priorities());
-  }
-
   // ---------- matrix ----------
 
   function usageStep(count, max) {
@@ -1254,26 +1184,6 @@
           : 'Every Enterprise profile technique has at least one mapped control.']);
       }
     }
-    const kevIn = mappedDomains(P, 'kev');
-    if (kevIn.length) {
-      const shown = kevIn.filter(D => D.kev);
-      if (!shown.length) {
-        out.push(['Known exploited CVEs mapped to profile techniques', null, P.mappings.kev ? P.mappingNotes.kev : notPulledNote('kev')]);
-      } else {
-        const cves = new Set(shown.flatMap(D => [...D.kev.cves.keys()]));
-        const exploited = new Set(shown.flatMap(D => [...D.kev.cves].filter(([, c]) => [...c.roles.values()].some(r => r.has('exploitation_technique'))).map(([id]) => id)));
-        const total = shown.reduce((n, D) => n + D.total, 0);
-        const covered = shown.reduce((n, D) => n + D.kev.covered.size, 0);
-        const per = shown.map(D => `${D.kev.cves.size} of the ${plural(D.kev.index.capabilities.size, 'CVE', 'CVEs')} mapped to ${D.title}`);
-        const one = shown.length === 1 && shown[0].kev.cves.size === 1;
-        const techs = shown.map(D => D.label).join(' and ') + ' profile';
-        out.push(['Known exploited CVEs mapped to profile techniques', cves.size,
-          `In CTID's mapping of CISA's KEV catalog (${versionLabel(P, 'kev')}), ${per.join(' and ')} ${one ? 'is' : 'are'} mapped to at least one profile technique, `
-          + `${exploited.size} of them through an exploitation technique the profile uses; `
-          + `${covered} of the ${plural(total, techs + ' technique has', techs + ' techniques have')} at least one CVE. `
-          + 'CTID links CVEs to techniques, not to threat groups. See the Known Exploited CVEs sheet.']);
-      }
-    }
     return out;
   }
 
@@ -1285,51 +1195,32 @@
     return clean(reason || 'not matched');
   };
 
-  /** Scope and method: which CTID mappings the workbook uses and how they were matched to the stored ATT&CK release. */
+  /** Scope and method: the CTID mapping the workbook uses and how it was matched to the stored ATT&CK release. */
   function mappingMethod(P) {
-    const keys = ['nist', 'kev'].filter(k => P.mappings[k]);
-    const missing = ['nist', 'kev'].filter(k => !P.mappings[k]);
-    const short = k => (k === 'nist' ? 'NIST 800-53' : 'KEV');
+    const meta = P.mappings.nist;
     const out = [];
-    if (keys.length) {
+    if (meta) {
       out.push('From the Center for Threat-Informed Defense\'s Mappings Explorer: '
-        + keys.map(k => `${k === 'nist' ? MAPPING_NAME.nist : 'CISA\'s KEV catalog'} (${versionLabel(P, k)}, pulled ${fmtDay(P.mappings[k].pulledAt)})`).join(' and ') + '.');
+        + `${MAPPING_NAME.nist} (${versionLabel(P, 'nist')}, pulled ${fmtDay(meta.pulledAt)}).`);
+    } else {
+      out.push(`${MAPPING_NAME.nist}: not pulled when this workpaper was exported`
+        + (mappedDomains(P, 'nist').length ? ', so the NIST 800-53 sheet is empty (pull it on ThreatSim\'s Data page and export again).' : '.'));
     }
-    for (const k of missing) {
-      out.push(`${MAPPING_NAME[k]}: not pulled when this workpaper was exported`
-        + (mappedDomains(P, k).length ? `, so the ${k === 'nist' ? 'NIST 800-53' : 'Known Exploited CVEs'} sheet is empty (pull it on ThreatSim's Data page and export again).` : '.'));
-    }
-    const shown = P.domains.filter(D => keys.some(k => D[k]));
-    if (keys.length && !shown.length) {
-      out.push('Not used: this threat profile has no Enterprise or Mobile ATT&CK techniques.');
+    const shown = meta ? P.domains.filter(D => D.nist) : [];
+    if (meta && !shown.length) {
+      out.push('Not used: this threat profile has no Enterprise ATT&CK techniques.');
     }
     for (const D of shown) {
-      const used = keys.filter(k => D[k]);
-      const replaced = new Map(), counts = [], lost = [];
-      for (const k of used) {
-        const ix = D[k].index;
-        for (const x of ix.replaced) replaced.set(x.from, x.to);
-        if (ix.replaced.length) counts.push(`${short(k)} ${ix.replaced.length}`);
-        for (const x of ix.unresolved) lost.push(`${x.techniqueId} (${short(k)}: ${unmatchedReason(D, x.reason)}, ${plural(x.rows, 'mapping', 'mappings')})`);
-      }
-      const ids = [...replaced].sort((a, b) => byAttackId({ attackId: a[0] }, { attackId: b[0] })).map(([from, to]) => from + ' → ' + to);
-      const versions = used.map(k => P.mappings[k].attackVersion);
-      const targets = used.length === 1 ? `${MAPPING_NAME[used[0]]} targets ATT&CK ${versions[0]}`
-        : new Set(versions).size === 1 ? `Both target ATT&CK ${versions[0]}`
-          : used.map((k, i) => `${MAPPING_NAME[k]} targets ATT&CK ${versions[i]}`).join(' and ');
-      out.push(`${targets}; ThreatSim matched ${used.length > 1 ? 'them' : 'it'} to ${D.title} v${D.version} by technique ID`
-        + (ids.length ? `, carrying the IDs revoked since forward to their replacements (${counts.join(', ')}): ${listCapped(ids, 25)}` : '')
+      const ix = D.nist.index;
+      const ids = ix.replaced.map(x => [x.from, x.to]).sort((a, b) => byAttackId({ attackId: a[0] }, { attackId: b[0] })).map(([from, to]) => from + ' → ' + to);
+      const lost = ix.unresolved.map(x => `${x.techniqueId} (NIST 800-53: ${unmatchedReason(D, x.reason)}, ${plural(x.rows, 'mapping', 'mappings')})`);
+      out.push(`${MAPPING_NAME.nist} targets ATT&CK ${meta.attackVersion}; ThreatSim matched it to ${D.title} v${D.version} by technique ID`
+        + (ids.length ? `, carrying the IDs revoked since forward to their replacements (NIST 800-53 ${ix.replaced.length}): ${listCapped(ids, 25)}` : '')
         + (lost.length ? `. Not matched, so left out: ${listCapped(lost, 10, '; ')}` : '') + '.');
     }
-    const used = usedMappings(P);
-    if (used.includes('nist')) {
+    if (usedMappings(P).includes('nist')) {
       out.push('ThreatSim, not CTID, counts a NIST control for a sub-technique when CTID maps the control to its parent technique ("via" on the NIST 800-53 sheet). '
         + 'NIST 800-53 covers Enterprise ATT&CK only.');
-    }
-    if (used.includes('kev')) {
-      out.push('A KEV CVE counts for the exact technique CTID maps it to. KEV covers Enterprise and Mobile ATT&CK.'
-        + ((P.mappings.kev.files || []).some(f => f && f.domain === 'mobile-attack') && !P.domains.some(D => D.domain === 'mobile-attack')
-          ? ' The catalog\'s Mobile CVEs appear only for Mobile ATT&CK techniques of the profile, which needs Mobile ATT&CK pulled and switched on in ThreatSim.' : ''));
     }
     return out.join(' ');
   }
@@ -1337,9 +1228,9 @@
   /** Licence and source rows for the CTID mappings in the workbook. */
   function mappingLicences(P) {
     // only for the mappings this workbook uses
-    const nist = P.domains.some(D => D.nist), kev = P.domains.some(D => D.kev);
+    const nist = P.domains.some(D => D.nist);
     return [
-      nist || kev ? ['Mappings Explorer licence', 'Control and vulnerability mappings from the Center for Threat-Informed Defense\'s Mappings Explorer (https://ctid.mitre.org/mappings/). '
+      nist ? ['Mappings Explorer licence', 'Control mappings from the Center for Threat-Informed Defense\'s Mappings Explorer (https://ctid.mitre.org/mappings/). '
         + '© 2024 MITRE. Licensed under the Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0); distributed on an "AS IS" basis, without warranties or conditions of any kind. '
         + 'Source: https://github.com/center-for-threat-informed-defense/mappings-explorer'] : null,
       nist ? ['NIST SP 800-53', 'NIST Special Publication 800-53 Revision 5, Security and Privacy Controls for Information Systems and Organizations, is a publication of the '

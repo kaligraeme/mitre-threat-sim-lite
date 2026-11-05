@@ -13,7 +13,7 @@
   const doc = global.document;
   const root = doc.documentElement;
   const SIGN_IN_PAGE = 'login.html';
-  const PAGES = ['index.html', 'simulator.html', 'threatmodel.html'];   // pages sign-in may return to
+  const PAGES = ['index.html', 'simulator.html'];   // pages sign-in may return to
   const SIGNAL_KEY = 'threatsim.auth.signal';       // tells this browser's other tabs to check the session
   const MIN_PASSWORD = 8;
   const CHECK_MS = 60 * 1000;

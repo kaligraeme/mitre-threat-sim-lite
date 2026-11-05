@@ -222,13 +222,13 @@
     ui: {
       pickFamily: 'attack', pickTab: 'groups', lastTab: {}, search: '', matchDesc: false,
       swType: '', swPlatform: '', swCategory: '', csType: '', entType: '', purpose: '', campSince: '',
-      tab: 'matrix', matrixDomain: null, colorMode: 'usage', showAll: false, filter: '', sort: {}, kevExploited: false,
+      tab: 'matrix', matrixDomain: null, colorMode: 'usage', showAll: false, filter: '', sort: {},
       spiderDomain: null, spiderTable: false, spiderHow: false,   // the coverage chart: domain picked, table shown, help open
     },
     results: [],
     catalogs: null,
-    // CTID mappings (MappingsDB): per source id { meta, details: Map id -> text, indexes: { domain: Index },
-    // cvesByDomain: { domain: distinct capabilities in the rows } }; errors: per source id, why it could not be read
+    // CTID mappings (MappingsDB): per source id { meta, details: Map id -> text, indexes: { domain: Index } };
+    // errors: per source id, why it could not be read
     mappings: { sources: {}, errors: {} },
   };
 
@@ -244,8 +244,7 @@
       inPlace: { mitigations: [...state.inPlace.mitigations], detections: [...state.inPlace.detections] },
       ui: { pickFamily: state.ui.pickFamily, pickTab: state.ui.pickTab, lastTab: state.ui.lastTab, tab: state.ui.tab,
             colorMode: state.ui.colorMode, showAll: state.ui.showAll, matrixDomain: state.ui.matrixDomain, matchDesc: state.ui.matchDesc,
-            kevExploited: state.ui.kevExploited, spiderDomain: state.ui.spiderDomain, spiderTable: state.ui.spiderTable,
-            spiderHow: state.ui.spiderHow },
+            spiderDomain: state.ui.spiderDomain, spiderTable: state.ui.spiderTable, spiderHow: state.ui.spiderHow },
     };
     try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch (_) { /* storage unavailable */ }
   }
@@ -320,18 +319,10 @@
     return (state.catalogs = out);
   }
 
-  // ---------- CTID mappings (NIST SP 800-53 Rev 5, CISA KEV) ----------
+  // ---------- CTID mappings (NIST SP 800-53 Rev 5) ----------
 
-  const MAP = SimEngine.MAPPING_SOURCES;   // { nist: {id, domains}, kev: {id, domains} }
+  const MAP = SimEngine.MAPPING_SOURCES;   // { nist: {id, domains} }
   const NIST_PAGE = 'https://ctid.mitre.org/mappings/external/nist/';
-  const KEV_CATALOG = 'https://www.cisa.gov/known-exploited-vulnerabilities-catalog';
-  const KEV_ROLES = [
-    ['exploitation_technique', 'Exploitation technique', 'Exploitation'],
-    ['primary_impact', 'Primary impact', 'Primary impact'],
-    ['secondary_impact', 'Secondary impact', 'Secondary impact'],
-    ['uncategorized', 'Uncategorized', 'Uncategorized'],
-  ];
-  const roleName = type => (KEV_ROLES.find(x => x[0] === type) || [type, type || 'Mapped'])[1];
   const mappingSource = key => state.mappings.sources[MAP[key].id] || null;
   /** The index for a source and domain: null when the source isn't pulled (an empty index when it has no rows there). */
   const mappingIndex = (key, domain) => { const s = mappingSource(key); return s ? s.indexes[domain] || null : null; };
@@ -354,9 +345,8 @@
           if (!byDomain.has(row.domain)) byDomain.set(row.domain, []);
           byDomain.get(row.domain).push(row);
         }
-        const src = { meta, details: new Map(), indexes: {}, cvesByDomain: {} };
+        const src = { meta, details: new Map(), indexes: {} };
         for (const d of Array.isArray(details) ? details : []) if (d && typeof d.id === 'string' && typeof d.text === 'string') src.details.set(d.id, d.text);
-        for (const [domain, list] of byDomain) src.cvesByDomain[domain] = new Set(list.map(x => x.capabilityId).filter(Boolean)).size;
         for (const domain of MAP[key].domains) {
           if (!state.models[domain]) continue;
           src.indexes[domain] = SimEngine.indexMappings(state.models[domain], byDomain.get(domain) || []);
@@ -380,7 +370,7 @@
       r.statusCounts = SimEngine.applyPosture(r, state.inPlace);
       r.mitPriority = SimEngine.prioritize(r.mitigations, state.inPlace.mitigations, r.domain, r.techniques);
       r.detPriority = SimEngine.prioritize(r.detections, state.inPlace.detections, r.domain, r.techniques);
-      SimEngine.mapExternal(r, { nist: mappingIndex('nist', r.domain), kev: mappingIndex('kev', r.domain) });
+      SimEngine.mapExternal(r, { nist: mappingIndex('nist', r.domain) });
     }
     if (!state.results.some(r => r.domain === state.ui.matrixDomain)) {
       state.ui.matrixDomain = state.results.length ? state.results[0].domain : null;
@@ -1332,13 +1322,13 @@
     if (spider && spider.clear) spider.clear(); else hideTip();
   }
 
-  /** Distinct controls or CVEs over all results; null (no count shown) when no result has the mapping. */
+  /** Distinct controls over all results; null (no count shown) when no result has the mapping. */
   const mappingTotal = key => {
     const ok = state.results.filter(r => r[key]);
-    return ok.length ? new Set(ok.flatMap(r => [...(key === 'nist' ? r.nist.controls : r.kev.cves).keys()])).size : null;
+    return ok.length ? new Set(ok.flatMap(r => [...r[key].controls.keys()])).size : null;
   };
   // Labels must not contain Matrix, Techniques, Mitigations or Detections (tests click tabs by text), and the
-  // row must stay one line at 1280px: the mapping tabs use short labels with the full name as their title
+  // row must stay one line at 1280px: the 800-53 tab uses a short label with the full name as its title
   // ("NIST" is read out but not shown). A label is text or a function returning nodes (rebuilt each render).
   const TABS = [
     { key: 'matrix', label: 'Matrix' },
@@ -1346,7 +1336,6 @@
     { key: 'mitigations', label: 'Mitigations', count: r => r.mitigations.size },
     { key: 'detections', label: 'Detections', count: r => r.detections.size },
     { key: 'nist', label: () => [el('span', { class: 'vh', text: 'NIST ' }), '800-53'], title: 'NIST SP 800-53 Rev 5 controls mapped to the profile techniques (CTID Mappings Explorer)', total: () => mappingTotal('nist') },
-    { key: 'kev', label: 'KEV', title: 'CISA Known Exploited Vulnerabilities (CVEs) mapped to the profile techniques (CTID Mappings Explorer)', total: () => mappingTotal('kev') },
     { key: 'telemetry', label: 'Telemetry', count: r => r.dataComponents.size },
     { key: 'assets', label: 'ICS assets', count: r => r.assets.size },
   ];
@@ -1400,7 +1389,7 @@
     tools.replaceChildren();
     body.replaceChildren();
     ({ matrix: renderMatrix, techniques: renderTechniques, mitigations: renderMitigations, detections: renderDetections,
-       nist: renderNist, kev: renderKev, telemetry: renderTelemetry, assets: renderAssets })[state.ui.tab](tools, body);
+       nist: renderNist, telemetry: renderTelemetry, assets: renderAssets })[state.ui.tab](tools, body);
     if (place && (!document.activeElement || document.activeElement === document.body)) focusQuiet(findPlace(place));
   }
 
@@ -1523,18 +1512,17 @@
   }
   function hideTip() { const tip = $('#tip'); tip.hidden = true; delete tip.dataset.of; }
 
-  /** "NIST 800-53: 12 controls · KEV: 3 CVEs" for a matrix cell, from the indexes (used or not). */
+  /** "NIST 800-53: 12 controls" for a matrix cell, from the index (used or not). */
   function mappingTipRow(r, techId) {
     const st = r.mappingStatus || {};
     const parts = [];
     if (st.nist === 'ok') parts.push('NIST 800-53: ' + plural(SimEngine.controlsFor(r.nist.index, r.model, techId).length, 'control', 'controls'));
-    if (st.kev === 'ok') parts.push('KEV: ' + plural(SimEngine.cvesFor(r.kev.index, techId).length, 'CVE', 'CVEs'));
     return parts.length ? el('div', { class: 'row', text: parts.join(' · ') }) : null;
   }
 
   // ---------- tables ----------
 
-  /** A row's key for focus restoring: the table, the result's domain and the row's object (a control, CVE, technique …). */
+  /** A row's key for focus restoring: the table, the result's domain and the row's object (a control, technique …). */
   const defaultRowKey = row => (row.r ? row.r.domain : '') + '|' + (row.id != null ? row.id : row.t ? row.t.tech.id : '');
 
   /**
@@ -1774,11 +1762,8 @@
     }
   }
 
-  // ---------- NIST 800-53 and KEV tabs ----------
+  // ---------- NIST 800-53 tab ----------
 
-  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  /** '2025-07-28' -> '28 Jul 2025' (as the Data page writes catalog dates); anything else as given. */
-  const fmtDate = iso => { const d = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || ''); return d && MONTHS[+d[2] - 1] ? +d[3] + ' ' + MONTHS[+d[2] - 1] + ' ' + d[1] : (iso || ''); };
   const dataPageLink = text => el('a', { href: 'index.html', text });
   /** "16 IDs carried forward to their replacements, 1 not current" for one index. */
   const changedIds = ix => [ix.replaced.length ? plural(ix.replaced.length, 'ID', 'IDs') + ' carried forward to ' + (ix.replaced.length === 1 ? 'its replacement' : 'their replacements') : null,
@@ -1787,34 +1772,32 @@
   const shownIndexes = key => { const src = mappingSource(key); return src ? Object.entries(src.indexes).filter(([d, ix]) => ix.rowCount && state.results.some(r => r.domain === d && r[key])) : []; };
   /** Why a source's rows could not be read on this page load (null when they could, or were never pulled). */
   const mappingError = key => state.mappings.errors[MAP[key].id] || null;
-  const sourceName = key => (key === 'nist' ? 'NIST 800-53' : 'KEV');
   const withStop = t => (/[.!?]$/.test(t) ? t : t + '.');
 
-  /** Provenance line for a mapping tab: dataset, ATT&CK version it targets, how it was matched to the stored release(s). */
+  /** Provenance line for the mapping tab: dataset, ATT&CK version it targets, how it was matched to the stored release. */
   function mappingProvenance(key) {
     const shown = shownIndexes(key);
     if (!shown.length) return null;
     const m = mappingSource(key).meta;
     const parts = shown.map(([d, ix]) => { const changes = changedIds(ix); return domainTitle(d) + ' v' + ix.attackVersion + (changes ? ' (' + changes + ')' : ''); });
-    const what = key === 'nist' ? 'NIST SP 800-53 Rev 5' : 'the CISA KEV catalog' + (m.frameworkVersion ? ' of ' + fmtDate(m.frameworkVersion) : '');
-    return 'CTID mapping of ' + what + ' to ATT&CK ' + (m.attackVersion || '?') + ', matched by ID to ' + parts.join(' and ') + '.';
+    return 'CTID mapping of NIST SP 800-53 Rev 5 to ATT&CK ' + (m.attackVersion || '?') + ', matched by ID to ' + parts.join(' and ') + '.';
   }
 
   /** "The NIST 800-53 mappings are not pulled", or why they could not be read (technique drawer). */
   function notPulledHint(key) {
     const err = mappingError(key);
-    if (err) return el('p', { class: 'hint', text: 'The ' + sourceName(key) + ' mappings could not be read (' + err + '). Reload the page to try again.' });
-    return el('p', { class: 'hint' }, 'The ' + sourceName(key) + ' mappings are not pulled. ', dataPageLink('Pull them on the Data page'), '.');
+    if (err) return el('p', { class: 'hint', text: 'The NIST 800-53 mappings could not be read (' + err + '). Reload the page to try again.' });
+    return el('p', { class: 'hint' }, 'The NIST 800-53 mappings are not pulled. ', dataPageLink('Pull them on the Data page'), '.');
   }
 
-  /** Why a result has no rows on a mapping tab, as a hint (null when it has the mapping). */
+  /** Why a result has no rows on the mapping tab, as a hint (null when it has the mapping). */
   function mappingNote(key, r) {
     const st = r.mappingStatus ? r.mappingStatus[key] : 'not-pulled';
-    const name = key === 'nist' ? 'NIST SP 800-53' : 'KEV';
+    const name = 'NIST SP 800-53';
     if (st === 'ok') return null;
     if (st === 'not-this-domain') {
-      if (familyOf(r.domain) === 'atlas' || r.domain === 'ics-attack') return el('p', { class: 'hint', text: 'No NIST 800-53 or KEV mappings exist for ' + domainTitle(r.domain) + '.' });
-      return el('p', { class: 'hint', text: 'CTID maps NIST 800-53 to Enterprise ATT&CK only; the known exploited CVEs of ' + domainTitle(r.domain) + ' are on the KEV tab.' });
+      if (familyOf(r.domain) === 'atlas' || r.domain === 'ics-attack') return el('p', { class: 'hint', text: 'No NIST 800-53 mappings exist for ' + domainTitle(r.domain) + '.' });
+      return el('p', { class: 'hint', text: 'CTID maps NIST 800-53 to Enterprise ATT&CK only.' });
     }
     if (st === 'no-attack-data') return el('p', { class: 'hint', text: 'The pulled ' + name + ' mappings (' + mappingSource(key).meta.label + ') have no ' + domainTitle(r.domain) + ' entries.' });
     // reading failed: pulling again is not the remedy, so don't send the user to the Data page
@@ -1835,7 +1818,7 @@
   /**
    * IDs of CTID's that changed in the stored ATT&CK release: carried forward, or not current. The list is the
    * mapping file's, for the domains this profile shows the mapping for; the IDs whose carried-forward mappings
-   * reach this profile (r.nist / r.kev .carriedFrom) come first, under their own heading.
+   * reach this profile (r.nist.carriedFrom) come first, under their own heading.
    */
   function changedIdsBlock(key) {
     const src = mappingSource(key);
@@ -1877,9 +1860,6 @@
       list.length > n ? el('span', { class: 'tag', title: list.slice(n).map(([m, k]) => m.attackId + ' ' + m.name + ' (' + k + ')').join(', '), text: '+' + (list.length - n) }) : null);
   }
   const RELATED_NOTE = 'Worked out by ThreatSim from the profile techniques they share; not part of CTID\'s mapping.';
-
-  /** Name cell that opens the drawer, so the row can be reached by keyboard. */
-  const drawerButton = (text, open) => el('button', { class: 'cellbtn', text, on: { click: open } });
 
   function renderNist(tools, body) {
     // the box filters the control table only: offer it when some result has a control to list
@@ -1933,92 +1913,6 @@
       ], { id: 'nist', defaultSort: { key: 'tech', dir: 'desc' }, onRow: open }));
     });
     append(body, [changedIdsBlock('nist')]);
-  }
-
-  /** A CVE is exploited through a profile technique when one of its profile techniques has the exploitation role. */
-  const exploitedInProfile = c => [...c.roles.values()].some(set => set.has('exploitation_technique'));
-  /** The techniques CTID maps a CVE's exploitation to (current records, used by the profile or not). */
-  const exploitationTechs = (ix, model, cveId) => {
-    const cap = ix && ix.capabilities.get(cveId);
-    return cap ? [...new Set(cap.mappings.filter(x => x.type === 'exploitation_technique').map(x => x.tech))].map(id => model.byId.get(id)).filter(Boolean) : [];
-  };
-  const KEV_CAVEAT = 'CTID links CVEs to ATT&CK techniques, not to threat groups: a CVE is listed because this profile uses one of its techniques, not because these threats are known to exploit it.';
-
-  /** "415 of the 419 CVEs CTID mapped to Enterprise ATT&CK use a technique in this profile, through ..." */
-  function kevCoverText(r, multi) {
-    const all = r.kev.index.capabilities.size;
-    const n = r.kev.cves.size, k = r.kev.covered.size, total = r.techniques.size;
-    const exploited = [...r.kev.cves.values()].filter(exploitedInProfile).length;
-    const lead = (multi ? domainLabel(r.domain) + ': ' : '');
-    const mapped = plural(all, 'CVE', 'CVEs') + ' CTID mapped to ' + domainTitle(r.domain);
-    if (!n) return lead + 'None of the ' + mapped + ' uses a technique in this profile.';
-    return lead + fmtN(n) + ' of the ' + mapped + (n === 1 ? ' uses' : ' use') + ' a technique in this profile, through ' + (total === 1 ? 'the profile\'s only technique' : fmtN(k) + ' of the profile\'s ' + fmtN(total) + ' techniques')
-      + (n === 1 ? (exploited ? ', including its exploitation technique.' : ', not its exploitation technique.')
-        : '; ' + fmtN(exploited) + ' of them through an exploitation technique the profile uses.');
-  }
-
-  function renderKev(tools, body) {
-    const ok = state.results.filter(r => r.kev);
-    // CVEs for this profile at all (a profile none of whose techniques has one gets the sentence, not an empty table,
-    // and no filter box or switch, as there is nothing for them to act on)
-    const any = ok.some(r => r.kev.cves.size);
-    if (any) {
-      tools.append(filterBox('Filter CVEs or technique IDs', () => renderTabBody(renderKev), 150));
-      const only = el('input', { type: 'checkbox', checked: !!state.ui.kevExploited });
-      only.addEventListener('change', () => { state.ui.kevExploited = only.checked; persist(); renderTabBody(renderKev); });
-      tools.append(el('label', { class: 'toggle', title: 'Leave out the CVEs listed only for their impact techniques' }, only, 'Only CVEs exploited through a profile technique'));
-    }
-    const prov = mappingProvenance('kev');
-    if (prov) tools.append(el('span', { class: 'hint', text: prov }));
-    // Mobile CVEs need Mobile ATT&CK pulled and switched on
-    const src = mappingSource('kev');
-    const mobileCves = src ? src.cvesByDomain['mobile-attack'] || 0 : 0;
-    const mobileNote = !mobileCves || !ok.length || state.results.some(r => r.domain === 'mobile-attack') ? null
-      : !state.models['mobile-attack'] ? plural(mobileCves, 'Mobile CVE shows', 'Mobile CVEs show') + ' only when Mobile ATT&CK is pulled (Data page) and switched on.'
-        : !state.domains.has('mobile-attack') ? plural(mobileCves, 'Mobile CVE shows', 'Mobile CVEs show') + ' only when Mobile ATT&CK is switched on (Domains).'
-          : 'None of the selected threats appear in Mobile ATT&CK, so its ' + plural(mobileCves, 'CVE', 'CVEs') + ' are not shown.';
-    for (const r of ok) {
-      body.append(el('p', { class: 'hint map-cover', data: { domain: r.domain, cves: r.kev.cves.size, all: r.kev.index.capabilities.size, techniques: r.kev.covered.size,
-        total: r.techniques.size, exploited: [...r.kev.cves.values()].filter(exploitedInProfile).length }, text: kevCoverText(r, ok.length > 1) }));
-    }
-    if (any) body.append(el('p', { class: 'hint' }, KEV_CAVEAT));
-    if (mobileNote) body.append(el('p', { class: 'hint', text: mobileNote }));
-    // results without the mapping say why above the table (not below a few hundred rows)
-    for (const r of state.results) { const note = mappingNote('kev', r); if (note) body.append(note); }
-    const rows = [];
-    for (const r of ok) for (const [id, c] of r.kev.cves) {
-      if (state.ui.kevExploited && !exploitedInProfile(c)) continue;
-      const ids = [...c.techniques].map(t => r.model.byId.get(t).attackId).join(' ');
-      if (matches(c.obj, c.obj.typeName + ' ' + ids)) rows.push({ r, id, c, exploited: exploitedInProfile(c) });
-    }
-    if (any) {
-      const multi = new Set(ok.filter(r => r.kev.cves.size).map(r => r.domain)).size > 1;
-      const byRole = (x, type) => [...x.c.roles].filter(([, set]) => set.has(type)).map(([t]) => t);
-      const open = x => openDrawer(() => cveDrawer(x.r.domain, x.id));
-      // the exploitation column says so when the CVE's exploitation technique is not one the profile uses
-      const exploitationCell = x => {
-        const ids = byRole(x, 'exploitation_technique');
-        if (ids.length) return techTags(x.r, ids, 3);
-        const techs = exploitationTechs(x.r.kev.index, x.r.model, x.id);
-        return el('span', { class: 'small muted', text: 'not in profile',
-          title: techs.length ? 'CTID maps its exploitation to ' + techs.map(t => t.attackId + ' ' + t.name).join(', ') + ', which this profile does not use' : 'CTID maps no exploitation technique for this CVE' });
-      };
-      body.append(table(rows, [
-        multi && { key: 'domain', label: 'Domain', sort: x => domainLabel(x.r.domain), render: x => domainLabel(x.r.domain) },
-        { key: 'id', label: 'CVE', sort: x => x.id, render: x => idLink(x.c.obj) },
-        { key: 'name', label: 'Vulnerability', sort: x => x.c.obj.name, render: x => drawerButton(x.c.obj.name, () => open(x)) },
-        { key: 'type', label: 'Type', sort: x => x.c.obj.typeName, render: x => x.c.obj.typeName },
-        // sorted: CVEs exploited through a profile technique first, then by profile techniques
-        { key: 'exploitation_technique', label: 'Exploitation', title: 'The technique the CVE is exploited through, when the profile uses it (sorts CVEs exploited through a profile technique first)',
-          sort: x => (x.exploited ? 100000 : 0) + x.c.techniques.size, render: exploitationCell },
-        ...KEV_ROLES.slice(1, 3).map(([type, , short]) => ({ key: type, label: short, render: x => techTags(x.r, byRole(x, type), 3) })),
-        { key: 'tech', label: 'Profile techniques', num: true, sort: x => x.c.techniques.size, render: x => String(x.c.techniques.size) },
-      ].filter(Boolean), { id: 'kev', defaultSort: { key: 'exploitation_technique', dir: 'desc' }, onRow: open,
-        // the switch, not a typed filter, can be what leaves the table empty
-        empty: !rows.length && !state.ui.filter.trim() && state.ui.kevExploited
-          ? 'None of these CVEs is exploited through a technique this profile uses. Switch off "Only CVEs exploited through a profile technique" to list them all.' : null }));
-    }
-    append(body, [changedIdsBlock('kev')]);
   }
 
   // ---------- drawer ----------
@@ -2080,8 +1974,8 @@
   const resultFor = domain => state.results.find(r => r.domain === domain);
 
   function drawerHead(kicker, obj, extra) {
-    // NIST controls have no verified per-control page (the drawer links CTID's NIST page); CVEs link NVD
-    const site = obj.kind === 'kev-cve' ? 'nvd.nist.gov' : obj.kind === 'nist-control' ? null : AttackDB.FAMILIES[familyOf(obj.domain)].site;
+    // NIST controls have no verified per-control page (the drawer links CTID's NIST page)
+    const site = obj.kind === 'nist-control' ? null : AttackDB.FAMILIES[familyOf(obj.domain)].site;
     return [
       el('div', { class: 'kicker' }, kicker, ' · ', obj.url && site ? el('a', { href: obj.url, target: '_blank', rel: 'noopener',
         text: obj.attackId + ' on ' + site }) : obj.kind === 'nist-control' ? el('span', { class: 'mono', text: obj.attackId }) : obj.attackId),
@@ -2213,19 +2107,17 @@
     ? [...items.slice(0, shown), el('details', {}, el('summary', { text: 'Show ' + (items.length - shown) + ' more' }), ...items.slice(shown))]
     : items);
 
-  /** Related ATT&CK mitigations (by shared profile techniques) with their in-place switches; lead(id) may
-   *  return text to put before the overlap count. */
-  function relatedMitigationItems(domain, mits, what, lead) {
+  /** Related ATT&CK mitigations (by shared profile techniques) with their in-place switches. */
+  function relatedMitigationItems(domain, mits, what) {
     const model = state.models[domain];
     return [...mits].map(([id, n]) => {
       const m = model.byId.get(id);
       if (!m) return null;
-      const first = lead ? lead(id) : null;
       return el('div', { class: 'item' },
         el('div', { class: 'hd' }, idLink(m),
           el('button', { class: 'linkish grow', text: m.name, on: { click: () => openDrawer(() => mitigationDrawer(domain, m.id)) } }),
           postureToggle('mitigations', domain, m.id, 'In place')),
-        el('div', { class: 'kicker', text: (first ? first + ' · shares ' : 'Shares ') + plural(n, 'profile technique', 'profile techniques') + ' with ' + what }));
+        el('div', { class: 'kicker', text: 'Shares ' + plural(n, 'profile technique', 'profile techniques') + ' with ' + what }));
     }).filter(Boolean);
   }
 
@@ -2289,76 +2181,7 @@
     return out;
   }
 
-  /** A CVE from the CISA KEV catalog, with the techniques CTID mapped it to. */
-  function cveDrawer(domain, cveId) {
-    const ix = mappingIndex('kev', domain);
-    const cap = ix && ix.capabilities.get(cveId);
-    const model = state.models[domain];
-    const r = resultFor(domain);
-    const c = r && r.kev ? r.kev.cves.get(cveId) : null;
-    const obj = c ? c.obj : { id: cveId, attackId: cveId, name: cap ? cap.name : cveId, type: cap ? cap.group : '', typeName: cap ? cap.groupName : '',
-      url: 'https://nvd.nist.gov/vuln/detail/' + encodeURIComponent(cveId), kind: 'kev-cve' };
-    const out = drawerHead('Known exploited vulnerability · ' + domainLabel(domain), obj, el('div', { class: 'tags', style: 'margin-top:6px' },
-      obj.typeName ? el('span', { class: 'tag', title: 'Vulnerability type', text: obj.typeName }) : null,
-      c ? el('span', { class: 'tag', text: plural(c.techniques.size, 'profile technique', 'profile techniques') }) : null));
-    // why it is listed: the profile uses some of its techniques (not a link between the CVE and the threats)
-    const expAll = exploitationTechs(ix, model, cveId);
-    const expIn = c ? expAll.filter(t => c.techniques.has(t.id)) : [];
-    if (c) {
-      out.push(el('p', { class: 'hint', style: 'margin-top:10px', text: 'CTID links CVEs to ATT&CK techniques, not to threat groups. This CVE is listed because the profile uses '
-        + plural(c.techniques.size, 'of its techniques', 'of its techniques')
-        + (expIn.length ? ', including its exploitation ' + (expIn.length === 1 ? 'technique ' : 'techniques ') + andList(expIn.map(t => t.attackId))
-          : expAll.length ? ', not its exploitation ' + (expAll.length === 1 ? 'technique' : 'techniques') + ' (' + andList(expAll.map(t => t.attackId + ' ' + t.name)) + ')' : '')
-        + '; that does not mean these threats are known to exploit it.' }));
-    }
-    if (cap) {
-      // CTID usually writes one note per CVE and repeats it on every technique: show it once
-      const counts = new Map();
-      for (const x of cap.mappings) if (x.comments) counts.set(x.comments, (counts.get(x.comments) || 0) + 1);
-      const common = [...counts].sort((a, b) => b[1] - a[1])[0];
-      const shared = common && common[1] > 1 ? common[0] : null;
-      if (shared) out.push(el('div', { class: 'md', style: 'margin-top:10px' }, md(shared)));
-      for (const [type, label] of KEV_ROLES) {
-        const maps = cap.mappings.filter(x => x.type === type);
-        const lost = cap.unresolved.filter(x => x.type === type);
-        if (!maps.length && !lost.length) continue;
-        out.push(el('section', {}, el('h3', { text: label + ' (' + (maps.length + lost.length) + ')' }),
-          ...maps.map(x => {
-            const tech = model.byId.get(x.tech);
-            const t = r && r.techniques.get(tech.id);
-            return el('div', { class: 'item' },
-              el('div', { class: 'hd' }, techButton(domain, tech), t ? statusBadge(t.status) : el('span', { class: 'muted small', text: 'not in this profile' })),
-              carriedNote(x, 'kev', cveId) ? el('div', { class: 'kicker', text: carriedNote(x, 'kev', cveId) }) : null,
-              x.comments && x.comments !== shared ? el('div', { class: 'md' }, md(x.comments)) : null);
-          }),
-          ...lost.map(x => el('div', { class: 'item' }, el('span', { class: 'mono', text: x.techniqueId }), ' ' + x.techniqueName,
-            el('div', { class: 'kicker', text: 'Not shown: ' + x.reason })))));
-      }
-      if (cap.references.length) {
-        out.push(el('section', {}, el('h3', { text: 'References (' + cap.references.length + ')' }),
-          el('ul', { class: 'refs' }, ...cap.references.map(u => el('li', {}, el('a', { href: u, target: '_blank', rel: 'noopener', text: u }))))));
-      }
-    }
-    out.push(el('p', {}, el('a', { href: obj.url, target: '_blank', rel: 'noopener', text: cveId + ' in the NVD' }), ' · ',
-      el('a', { href: KEV_CATALOG, target: '_blank', rel: 'noopener', text: 'CISA KEV catalog' })));
-    if (c && c.mitigations.size) {
-      // mitigations of its exploitation technique first (the others address what an attacker does after)
-      const addresses = id => expIn.filter(t => r.techniques.get(t.id).mitigations.includes(id));
-      const mits = [...c.mitigations].map(([id, n], i) => ({ id, n, i, exp: addresses(id) }))
-        .sort((a, b) => (b.exp.length ? 1 : 0) - (a.exp.length ? 1 : 0) || a.i - b.i);
-      const expOf = new Map(mits.map(x => [x.id, x.exp]));
-      out.push(el('section', {}, el('h3', { text: 'Related ATT&CK mitigations (' + c.mitigations.size + ')' }),
-        el('p', { class: 'hint', text: 'ATT&CK mitigations of this profile that address the same techniques' + (expIn.length ? ', those of its exploitation ' + (expIn.length === 1 ? 'technique' : 'techniques') + ' first' : '')
-          + '. ' + RELATED_NOTE }),
-        ...capped(relatedMitigationItems(domain, new Map(mits.map(x => [x.id, x.n])), cveId,
-          id => (expOf.get(id).length ? 'Mitigates its exploitation ' + (expOf.get(id).length === 1 ? 'technique ' : 'techniques ') + andList(expOf.get(id).map(t => t.attackId)) : null)))));
-    }
-    const src = mappingSource('kev');
-    out.push(el('p', { class: 'small-print', text: 'Mapping: CTID Mappings Explorer (Apache-2.0)' + (src ? ', ' + src.meta.label : '') + '. KEV is CISA\'s catalog of vulnerabilities exploited in the wild.' }));
-    return out;
-  }
-
-  /** Technique drawer sections for the CTID mappings (Enterprise: NIST and KEV; Mobile: KEV). */
+  /** Technique drawer section for the CTID mapping (Enterprise: NIST). */
   function mappingSections(domain, techId) {
     const model = state.models[domain];
     const out = [];
@@ -2387,21 +2210,6 @@
             note ? el('div', { class: 'kicker', text: note }) : null,
             e.comments ? el('div', { class: 'md' }, md(e.comments)) : null);
         }), 12)));
-    }
-    if (MAP.kev.domains.includes(domain)) {
-      const ix = mappingIndex('kev', domain);
-      const list = ix ? SimEngine.cvesFor(ix, techId).sort((a, b) => idCmp(b.capId, a.capId)) : [];
-      // this section sits under "Used in this profile by …", whose procedures can name CVEs: say what links these
-      const r = resultFor(domain);
-      const inProfile = !!(r && r.techniques.has(techId));
-      out.push(el('section', {}, heading('Known exploited CVEs', ix, list.length),
-        !ix ? notPulledHint('kev') : !ix.rowCount ? el('p', { class: 'hint', text: 'The pulled KEV mappings have no ' + domainTitle(domain) + ' entries.' }) : !list.length ? el('p', { class: 'hint', text: 'CTID maps no CVE from the KEV catalog to this technique.' })
-          : el('p', { class: 'hint', text: 'CTID links these CVEs to this technique, not to threat groups' + (inProfile
-            ? ': they are listed for the technique, not because the threats in this profile are known to exploit them.' : '.') }),
-        ...capped(list.map(x => el('div', { class: 'item' },
-          el('div', { class: 'hd' }, el('a', { href: 'https://nvd.nist.gov/vuln/detail/' + encodeURIComponent(x.capId), target: '_blank', rel: 'noopener', class: 'mono', text: x.capId }),
-            el('button', { class: 'linkish grow', text: x.entry.capName, on: { click: () => openDrawer(() => cveDrawer(domain, x.capId)) } })),
-          el('div', { class: 'tags' }, [...x.types].map(t => el('span', { class: 'tag', text: roleName(t) }))))))));
     }
     return out;
   }
@@ -2579,7 +2387,7 @@
       showAll: state.ui.showAll,
       kinds: PICK_TABS, entity, domainLabel, domainInfo, activityPurposes: purposesOf,
       platformsByDomain: Object.fromEntries(state.results.map(r => [r.domain, [...platformsFor(r.domain)]])),
-      // provenance of the CTID mappings pulled (r.nist and r.kev travel on the results)
+      // provenance of the CTID mappings pulled (r.nist travels on the results)
       mappings: mappingMetas(),
       generatedAt: new Date(),
     };
