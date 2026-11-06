@@ -12,9 +12,7 @@ a signed-in session; a page asked for without one redirects to login.html, anyth
 Accounts are kept in <data dir>/users.json as PBKDF2-HMAC-SHA-256 hashes (310,000 iterations,
 random salt), outside the app folder. On first start the file is created with the account
 admin / admin. Sessions are an HttpOnly cookie holding a random token, kept in memory: restarting
-the server signs everyone out. Only the Python standard library is used. The Threat Modelling tab's
-optional Claude features (tm_claude.py) also need the Anthropic SDK and ANTHROPIC_API_KEY; without
-them, or with an SDK that fails to load or is too old, the tab works offline and nothing is sent anywhere.
+the server signs everyone out. Only the Python standard library is used.
 """
 import argparse
 import collections
@@ -40,14 +38,6 @@ import urllib.parse
 from datetime import datetime, timezone
 from email.utils import formatdate, parsedate_to_datetime
 
-try:
-    import tm_claude   # the Threat Modelling tab's optional Claude features (tm_claude.py, next to this file)
-    TM_CLAUDE_PROBLEM = ''
-except Exception as e:   # optional: a missing or broken tm_claude.py must never keep the server from starting
-    tm_claude = None
-    TM_CLAUDE_PROBLEM = ('tm_claude.py is missing.' if isinstance(e, ImportError) and e.name == 'tm_claude' else
-                         f'tm_claude.py could not be loaded ({type(e).__name__}: {" ".join(str(e).split())[:160]}).')
-
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_USER = 'admin'
 DEFAULT_PASSWORD = 'admin'
@@ -61,26 +51,18 @@ LOCK_MAX = 15 * 60                # ... up to this,
 QUIET_RESET = 3600                # ... until this long passes without a wrong password
 MIN_PASSWORD = 8                  # characters (Unicode code points)
 MAX_FIELD = 1024                  # longest username or password accepted
-MAX_BODY = 16 * 1024              # largest request body accepted (sign-in, password change)
-TM_IMAGE_BODY = 6 * 1024 * 1024   # a diagram picture sent for Claude to read (base64 in JSON; the page sends under 5 MB)
-TM_TEXT_BODY = 2 * 1024 * 1024    # a draft threat register sent for Claude to write up
-TM_BODY_GRACE = 15                # seconds either may take to get going; from then on ...
-TM_BODY_RATE = 8 * 1024           # ... it must have kept up at least this many bytes a second, however long it takes
-TM_BODY_TIME = 120                # seconds a refused body is read for, so the client sees the answer
-TM_PARSE = threading.BoundedSemaphore(2)   # bodies read as JSON at once (a picture takes a few times its size meanwhile)
+MAX_BODY = 16 * 1024              # largest request body accepted
 MAX_CONNECTIONS = 128             # open connections at once; more are dropped
-PAGES = ('index.html', 'simulator.html', 'threatmodel.html')   # signed-in pages sign-in may return to
+PAGES = ('index.html', 'simulator.html')               # signed-in pages sign-in may return to
 PUBLIC = {'login.html', 'css/app.css', 'js/login.js'}  # served without a session
-ROOT_FILES = {'index.html', 'simulator.html', 'threatmodel.html', 'login.html'}
-SERVED_DIRS = ('css/', 'js/', 'examples/')
+ROOT_FILES = {'index.html', 'simulator.html', 'login.html'}
+SERVED_DIRS = ('css/', 'js/')
 TYPES = {
     '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
     '.js': 'text/javascript; charset=utf-8', '.json': 'application/json',
     '.txt': 'text/plain; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png',
     '.ico': 'image/x-icon', '.woff2': 'font/woff2',
-    '.drawio': 'text/plain; charset=utf-8',   # the page reads it as text; an XML type would run scripts in the file
 }
-TM_POSTS = {'api/tm/decompose': TM_IMAGE_BODY, 'api/tm/enrich': TM_TEXT_BODY, 'api/tm/cancel': MAX_BODY}   # route -> largest body
 TOKEN_RE = re.compile(r'[A-Za-z0-9_-]{32,128}')
 LENGTH_RE = re.compile(r'[0-9]{1,9}')
 DUMMY_SALT = bytes(16)
@@ -259,21 +241,12 @@ class Accounts:
 class Sessions:
     """Signed-in sessions, in memory, keyed by a hash of the cookie token. A session ends after
     SESSION_IDLE seconds without use, at sign-out, or when its account's password changes (its stamp
-    no longer matches the account's hash). on_end(key) is called for each session that ends."""
+    no longer matches the account's hash)."""
 
-    def __init__(self, on_end=None):
+    def __init__(self):
         self.lock = threading.Lock()
         self.live = {}    # key -> {'user', 'stamp', 'last'}   (last: time.monotonic())
         self.ended = {}   # key -> (reason, when): why a recent session ended, kept for a day
-        self.on_end = on_end
-
-    def _ended(self, keys):
-        """Tell on_end about sessions that have ended (outside the lock)."""
-        for k in keys if self.on_end else ():
-            try:
-                self.on_end(k)
-            except Exception as e:   # what follows a session's end never stops it ending
-                log(f'Error: after a session ended: {type(e).__name__}')
 
     @staticmethod
     def key(token):
@@ -282,9 +255,8 @@ class Sessions:
     def create(self, user, stamp):
         token = secrets.token_urlsafe(32)
         with self.lock:
-            expired = self._prune()
+            self._prune()
             self.live[self.key(token)] = {'user': user, 'stamp': stamp, 'last': time.monotonic()}
-        self._ended(expired)
         return token
 
     def get(self, token, touch):
@@ -301,37 +273,30 @@ class Sessions:
                 return dict(s), None
             del self.live[k]
             self.ended[k] = ('expired', now)
-        self._ended([k])
         return None, 'expired'
 
     def end(self, token, reason='signedout'):
         k = self.key(token)
         with self.lock:
-            ended = self.live.pop(k, None) is not None
-            if ended:
+            if self.live.pop(k, None) is not None:
                 self.ended[k] = (reason, time.monotonic())
-        self._ended([k] if ended else [])
 
     def end_user(self, user, keep, reason):
         """End every session of user but keep's (a token)."""
         spare, now = self.key(keep), time.monotonic()
         with self.lock:
-            keys = [k for k, s in self.live.items() if s['user'] == user and k != spare]
-            for k in keys:
+            for k in [k for k, s in self.live.items() if s['user'] == user and k != spare]:
                 del self.live[k]
                 self.ended[k] = (reason, now)
-        self._ended(keys)
 
     def _prune(self):
-        """Forget what is old; returns the keys of the sessions that expire now."""
+        """Forget what is old."""
         now = time.monotonic()
-        expired = [k for k, s in self.live.items() if now - s['last'] >= SESSION_IDLE]
-        for k in expired:
+        for k in [k for k, s in self.live.items() if now - s['last'] >= SESSION_IDLE]:
             del self.live[k]
             self.ended[k] = ('expired', now)
         for k in [k for k, (_, t) in self.ended.items() if now - t > 86400]:
             del self.ended[k]
-        return expired
 
 
 class Throttle:
@@ -577,7 +542,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         value = values[0].strip()
         return int(value) if LENGTH_RE.fullmatch(value) else -1
 
-    def read_body(self, limit=MAX_BODY):
+    def read_body(self):
         """The request body as bytes, or None after replying with an error."""
         n = self.body_length()
         if n is None:
@@ -586,7 +551,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             self.reply(400, 'Send the body with one plain Content-Length.')
             return None
-        if n > limit:
+        if n > MAX_BODY:
             self.close_connection = True
             self.reply(413, 'Request too large.')
             return None
@@ -613,7 +578,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def security_headers(self, page=False):
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('X-Frame-Options', 'DENY')
-        # the app's own pages run their scripts; anything else opened on its own (a diagram, an SVG) runs none
+        # the app's own pages run their scripts; anything else opened on its own (an SVG, say) runs none
         self.send_header('Content-Security-Policy', "frame-ancestors 'none'" if page else "sandbox; frame-ancestors 'none'")
         self.send_header('Referrer-Policy', 'same-origin')
         if self.is_https():
@@ -699,10 +664,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if head:
                 return self.reply(405, 'Use GET.', headers=[('Allow', 'GET')])
             return self.api_session(query)
-        if path in ('api/tm/status', 'api/tm/job'):
-            if head:
-                return self.reply(405, 'Use GET.', headers=[('Allow', 'GET')])
-            return self.api_tm(path, query)
         if path == '':
             path = 'index.html'
         if not servable(path):
@@ -729,8 +690,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         path, _ = self.split_target()
-        if path in TM_POSTS:
-            return self.post_tm(path)
         routes = {'login': self.post_login, 'logout': self.post_logout, 'api/password': self.post_password}
         if path not in routes:
             self.close_connection = True   # its body is never read
@@ -752,175 +711,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply_json(200, {'ok': False, 'reason': reason or 'none'}, headers=clear)
         self.reply_json(200, {'ok': True, 'user': s['user'], 'defaultPassword': s['isDefault']})
 
-    # ----- Threat Modelling: Claude (optional, see tm_claude.py) -----
-
-    def tm_session(self):
-        """The signed-in session for an api/tm/ call, or None after replying 401."""
-        s, reason = self.current_session(touch=False)
-        if not s:
-            clear = [self.session_cookie(None)] if reason else []
-            self.reply_json(401, {'ok': False, 'error': 'Your session has ended. Sign in again.'}, headers=clear)
-        return s
-
-    def tm_state(self):
-        return tm_claude.status() if tm_claude else {'available': False, 'model': '', 'reason': TM_CLAUDE_PROBLEM}
-
-    def tm_limits(self):
-        """The most one enrichment may hold (the page trims its request to these)."""
-        return dict(tm_claude.LIMITS, bytes=TM_TEXT_BODY)
-
-    def api_tm(self, path, query):
-        """GET api/tm/status: can Claude be used here, and with what limits? GET api/tm/job?id=: a Claude job's kind,
-        status (running, done, failed or cancelled), progress, and its result or error once it has ended."""
-        s = self.tm_session()
-        if not s:
-            return
-        state = self.tm_state()
-        if path == 'api/tm/status':
-            answer = {'ok': True, 'claude': state['available'], 'available': state['available'], 'model': state['model']}
-            if state['available']:
-                answer['limits'] = self.tm_limits()
-            return self.reply_json(200, answer)
-        job = tm_claude.JOBS.get(s['user'], (query.get('id') or [''])[0]) if tm_claude else None
-        if not job:
-            return self.reply_json(404, {'ok': False, 'error': 'That Claude request is not known here (it may have been '
-                                         'released or have expired, or the server was restarted).'})
-        self.reply_json(200, dict(job, ok=True))
-
-    def read_tm_body(self, n, limit=None):
-        """n bytes of body, or None after answering 408 (or when the client went away). However large it is, the body
-        must keep coming: from TM_BODY_GRACE seconds after it starts, at least TM_BODY_RATE bytes a second on average.
-        So a slow line has all the time a large picture needs, while a body that trickles in, or stalls, is let go
-        within seconds. With limit (seconds), its bytes are dropped instead, and reading stops at that limit."""
-        start, chunks, got, slow = time.monotonic(), [], 0, False
-        try:
-            while got < n:
-                left = start + TM_BODY_GRACE + got / TM_BODY_RATE - time.monotonic()   # until it falls behind
-                if limit is not None:
-                    left = min(left, start + limit - time.monotonic())
-                if left <= 0:
-                    raise TimeoutError
-                self.connection.settimeout(min(left, self.timeout))   # a read waits no longer than that
-                chunk = self.rfile.read1(min(WRITE_CHUNK, n - got))
-                if not chunk:
-                    break   # the client went away
-                if limit is None:
-                    chunks.append(chunk)
-                got += len(chunk)
-        except TimeoutError:
-            slow = True
-        finally:
-            self.connection.settimeout(self.timeout)
-        if got >= n:
-            return b''.join(chunks)
-        self.close_connection = True
-        if slow and limit is None:
-            self.reply_json(408, {'ok': False, 'error': 'The request came in too slowly, or stopped coming. Try again.'})
-        return None
-
-    def discard_body(self, n):
-        """Read and drop n bytes of body, so the client sees the answer instead of a reset connection; the connection
-        is closed after the answer if they don't keep coming, or take over TM_BODY_TIME seconds."""
-        self.read_tm_body(n, limit=TM_BODY_TIME)
-
-    def post_tm(self, path):
-        """POST api/tm/decompose or api/tm/enrich: start a Claude job and answer 202 with its id and kind; the page polls
-        api/tm/job. A user with a job running gets 429 with that job's id and kind; a busy server 429 too, a body that
-        comes in too slowly 408, and a job the host can't start a thread for 503. POST api/tm/cancel: see below."""
-        s = self.tm_session()   # before reading a large body
-        if not s:
-            self.close_connection = True
-            return
-        if not self.same_origin():
-            self.close_connection = True
-            return self.reply_json(403, {'ok': False, 'reason': 'origin', 'error': "The request didn't come from this site."})
-        if path == 'api/tm/cancel':
-            return self.post_tm_cancel(s)
-        if not self.tm_state()['available']:
-            self.close_connection = True
-            return self.reply_json(503, {'ok': False, 'error': 'Claude is not set up on this server.'})
-        if self.header('Content-Type').split(';')[0].strip().lower() != 'application/json':
-            self.close_connection = True
-            return self.reply_json(415, {'ok': False, 'error': 'Send the request as JSON.'})
-        n, limit = self.body_length(), TM_POSTS[path]
-        if n is not None and n < 0:
-            self.close_connection = True
-            return self.reply_json(400, {'ok': False, 'error': 'Send the body with one plain Content-Length.'})
-        n = n or 0
-        if n > limit:
-            self.close_connection = True
-            what = 'picture' if path == 'api/tm/decompose' else 'draft threat register'
-            return self.reply_json(413, {'ok': False, 'error': f'The {what} is too large to send to Claude (at most {limit // 2**20} MB).'})
-        kind = path.rsplit('/', 1)[-1]
-        # reserved before the body is read: one request per user at a time, and a few bodies arriving at once in all
-        # (they don't hold a place among the jobs running)
-        job, busy = tm_claude.JOBS.reserve(s['user'], kind, owner=Sessions.key(s['token']))
-        if busy:
-            self.discard_body(n)
-            return self.reply_json(429, dict(busy, ok=False))
-        handled = False
-        try:
-            body = self.read_tm_body(n)
-            if body is None:
-                return
-            with TM_PARSE:
-                if path == 'api/tm/decompose' and body.count(b'{') + body.count(b'[') > 64:   # a picture is one small object
-                    return self.reply_json(400, {'ok': False, 'error': 'Send one picture with its media type, width and height.'})
-                try:
-                    data = json.loads(body.decode('utf-8'))
-                except (UnicodeDecodeError, ValueError, RecursionError):
-                    data = None
-                if not isinstance(data, dict):
-                    return self.reply_json(400, {'ok': False, 'error': 'Send a JSON object.'})
-                if path == 'api/tm/decompose':
-                    fn, checked = tm_claude.decompose, tm_claude.check_decompose(data)
-                else:
-                    fn, checked = tm_claude.enrich, tm_claude.check_enrichment(data)
-            del body, data
-            started = tm_claude.JOBS.start(job, fn, checked)   # False: stopped while it arrived (it stays, cancelled)
-            handled = True
-        except tm_claude.Refused as e:   # the wrong shape (400), over a limit (413), busy (429), no thread (503)
-            answer = {'ok': False, 'error': str(e)}
-            if e.status == 413:
-                answer['limits'] = self.tm_limits()
-            return self.reply_json(e.status, answer)
-        except Exception as e:   # never a traceback for what a client sent
-            log(f'{self.address_string()} {s["user"]}: Claude request not started ({type(e).__name__})')
-            self.close_connection = True
-            return self.reply_json(400, {'ok': False, 'error': "The request couldn't be read."})
-        finally:
-            if not handled:
-                tm_claude.JOBS.release(job)
-        log(f'{self.address_string()} {s["user"]}: Claude job {job.id[:6]} ' + (f'started ({kind})' if started else 'stopped before it started'))
-        self.reply_json(202, {'ok': True, 'job': job.id, 'kind': kind})
-
-    def post_tm_cancel(self, s):
-        """POST api/tm/cancel {"job": id}: stop this user's running job (it sends no more requests to Claude and ends
-        'cancelled' with whatever it has), or release a finished job's result. With "release": false a finished job is
-        left as it is (a page that is closing stops its job this way, so a result that came after its last poll isn't
-        lost). Answers {ok, status: 'cancelled', 'released' or 'ended'}, or 404 for a job this user doesn't have."""
-        body = self.read_body()
-        if body is None:
-            return
-        try:
-            data = json.loads(body.decode('utf-8')) if body else {}
-        except (UnicodeDecodeError, ValueError, RecursionError):
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
-        query = self.split_target()[1]
-        jid = data.get('job')
-        if not isinstance(jid, str):
-            jid = (query.get('id') or [''])[0]
-        keep = data.get('release') is False or (query.get('release') or [''])[0] in ('0', 'false')
-        outcome = tm_claude.JOBS.cancel(s['user'], jid, release=not keep) if tm_claude and jid else None
-        if not outcome:
-            return self.reply_json(404, {'ok': False, 'error': 'That Claude request is not known here (it may have been '
-                                         'released or have expired, or the server was restarted).'})
-        if outcome == 'cancelled':
-            log(f'{self.address_string()} {s["user"]}: Claude job {jid[:6]} cancelled')
-        self.reply_json(200, {'ok': True, 'status': outcome})
-
     def post_login(self, fields):
         addr = self.client_addr()
         nxt = next_page(fields.get('next', ''))
@@ -940,11 +730,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if ok:
             old = self.cookie_token()
             token = SESSIONS.create(user, rec['hash'])
-            if old:   # a fresh token for every sign-in; a Claude job this browser runs for this account goes on under it
-                was, _ = SESSIONS.get(old, touch=False)
-                if was and was['user'] == user and tm_claude:
-                    tm_claude.JOBS.hand_over(Sessions.key(old), Sessions.key(token))
-                SESSIONS.end(old)
+            if old:
+                SESSIONS.end(old)   # a fresh token for every sign-in
             cookie = self.session_cookie(token)
             if self.wants_json():
                 return self.reply_json(200, {'ok': True, 'next': nxt}, headers=[cookie])
@@ -965,7 +752,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def post_logout(self, fields):
         token = self.cookie_token()
         if token:
-            SESSIONS.end(token)   # which also stops the Claude job this session runs (claude_session_ended)
+            SESSIONS.end(token)
         cookie = self.session_cookie(None)
         if self.wants_json():
             return self.reply_json(200, {'ok': True}, headers=[cookie])
@@ -1003,10 +790,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply_json(409, {'ok': False, 'message': 'The password was changed somewhere else meanwhile, '
                                          'so this change was not made.'})
         # a new token for this browser: the old one, and any copy of it, ends with the old password, as do the account's
-        # sessions in other browsers (and the Claude jobs they run); a Claude job this browser runs goes on under the new one
+        # sessions in other browsers
         token = SESSIONS.create(s['user'], rec['hash'])
-        if tm_claude:
-            tm_claude.JOBS.hand_over(Sessions.key(s['token']), Sessions.key(token))
         SESSIONS.end(s['token'], 'password')
         SESSIONS.end_user(s['user'], keep=token, reason='password')
         self.reply_json(200, {'ok': True}, headers=[self.session_cookie(token)])
@@ -1047,12 +832,6 @@ class Server(http.server.ThreadingHTTPServer):
         if isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError, socket.timeout, ssl.SSLError)):
             return   # a client that went away, timed out or didn't speak TLS: not worth a traceback
         super().handle_error(request, client_address)
-
-
-def claude_session_ended(key):
-    """A session has ended: stop the Claude jobs started in it. Their results wait for their user to sign in again."""
-    for jid, user in tm_claude.JOBS.session_ended(key) if tm_claude else ():
-        log(f'{user}: Claude job {jid[:6]} stopped, as the session that started it has ended')
 
 
 def instance_id(data_dir, port):
@@ -1121,7 +900,7 @@ def main():
         ACCOUNTS = Accounts(os.path.join(data_dir, 'users.json'), create_default=not args.set_password)
     except OSError as e:
         raise SystemExit(f'Cannot use the data directory {data_dir}: {e.strerror or e}. Choose another with --data-dir.')
-    SESSIONS = Sessions(on_end=claude_session_ended)
+    SESSIONS = Sessions()
     USER_TRIES = Throttle(MAX_ATTEMPTS, forget_on_success=True)
     ADDR_TRIES = Throttle(MAX_ADDR_ATTEMPTS, forget_on_success=False)
     PASSWORD_TRIES = Throttle(MAX_ATTEMPTS, forget_on_success=True)
@@ -1157,14 +936,6 @@ def main():
     else:
         where = "<this computer's address>" if wildcard else f'[{args.host}]' if ':' in args.host else args.host
     log(f'ThreatSim on {scheme}://{where}:{port}/  (accounts: {ACCOUNTS.path})')
-    claude = tm_claude.status() if tm_claude else {'available': False, 'reason': TM_CLAUDE_PROBLEM}
-    if claude['available']:
-        daily = f' (each user at most {tm_claude.JOBS_PER_DAY} Claude jobs a day)' if tm_claude.JOBS_PER_DAY else ''
-        fallback = ', with Anthropic\'s server-side fallback' if claude.get('fallback') else ', no server-side fallback'
-        log(f'Threat Modelling: Claude is on ({claude["model"]}{fallback}); pictures and draft registers go to Anthropic\'s '
-            f'API when a user asks{daily}.')
-    else:
-        log(f'Threat Modelling: Claude is off ({claude["reason"].rstrip(".")}). The tab works offline.')
     if ACCOUNTS.default_in_use():
         log(f'Warning: {DEFAULT_USER} still has the default password "{DEFAULT_PASSWORD}". Sign in and change it.')
     if not ctx and not local and not args.behind_proxy:
@@ -1175,8 +946,6 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        if tm_claude:
-            tm_claude.shutdown()   # no more Claude requests; its threads don't hold up the exit
         httpd.server_close()
 
 

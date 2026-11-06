@@ -5,7 +5,7 @@
  * threat profile (ATT&CK groups / software / campaigns, ATLAS case studies / entities /
  * software) to the techniques it uses, and from there to mitigations, detection
  * strategies, telemetry and (ICS) targeted assets, and (CTID mappings) to NIST SP 800-53
- * controls and CISA KEV CVEs. No DOM access here.
+ * controls. No DOM access here.
  */
 (function (global) {
   'use strict';
@@ -342,18 +342,15 @@
     });
   }
 
-  // ---------- external mappings: CTID Mappings Explorer (NIST SP 800-53 Rev 5, CISA KEV) ----------
+  // ---------- external mappings: CTID Mappings Explorer (NIST SP 800-53 Rev 5) ----------
 
-  // Which ATT&CK domains each mapping covers. NIST rolls a parent technique's controls down to its
-  // sub-techniques ("via parent"), except to one CTID judged not mappable; KEV matches the exact technique only.
+  // Which ATT&CK domains the mapping covers. NIST rolls a parent technique's controls down to its
+  // sub-techniques ("via parent"), except to one CTID judged not mappable.
   const MAPPING_SOURCES = {
     nist: { id: 'nist-800-53-r5', domains: ['enterprise-attack'] },
-    kev: { id: 'kev', domains: ['enterprise-attack', 'mobile-attack'] },
   };
   const NIST_URL = 'https://ctid.mitre.org/mappings/external/nist/';   // CTID's NIST page (no verified per-control pages)
-  const NVD_URL = 'https://nvd.nist.gov/vuln/detail/';
   const text = v => (typeof v === 'string' ? v.trim() : typeof v === 'number' ? String(v) : '');
-  const httpUrls = v => (Array.isArray(v) ? v.filter(u => typeof u === 'string' && /^https?:\/\//i.test(u)) : []);
   // one shared collator: localeCompare with options builds a new one per call, which is slow in sorts
   const idOrder = new Intl.Collator(undefined, { numeric: true }).compare;
   const TITLES = { 'enterprise-attack': 'Enterprise ATT&CK', 'mobile-attack': 'Mobile ATT&CK', 'ics-attack': 'ICS ATT&CK' };
@@ -390,11 +387,11 @@
   /**
    * Index one mapping source's rows for one domain (rows in MappingsDB's shape), once per page load.
    * Returns { source, domain, attackVersion, rowCount, ctidTechniques,
-   *   byTech: Map techSTIX -> [Entry], capabilities: Map capId -> {id, name, group, groupName, techniques:Set,
-   *   mappings:[{tech, type, comments, from}], references:[url], unresolved:[...]}, nonMappable: Map techSTIX -> comment,
+   *   byTech: Map techSTIX -> [Entry], capabilities: Map capId -> {id, name, group, groupName, techniques:Set},
+   *   nonMappable: Map techSTIX -> comment,
    *   nonMappableFrom: Map techSTIX -> Set of older CTID IDs a not-mappable judgment was carried forward from,
    *   replaced: [{from, fromName, to, toId, toName, rows}], unresolved: [{techniqueId, techniqueName, rows, reason}] }
-   * Entry = { capId, capName, group, groupName, type, comments, references, from?, fromAll? } (from: the CTID ID it was
+   * Entry = { capId, capName, group, groupName, type, comments, from?, fromAll? } (from: the CTID ID it was
    *   carried forward from; fromAll: every such ID when several older techniques now share one record)
    */
   function indexMappings(model, rows) {
@@ -417,8 +414,7 @@
       const id = row.capabilityId;
       let c = index.capabilities.get(id);
       if (!c) index.capabilities.set(id, c = { id, name: text(row.capabilityName) || id, group: text(row.group), groupName: text(row.groupName) || text(row.group),
-        techniques: new Set(), mappings: [], references: [], unresolved: [] });
-      for (const u of httpUrls(row.references)) if (!c.references.includes(u)) c.references.push(u);
+        techniques: new Set() });
       return c;
     };
 
@@ -433,7 +429,6 @@
       if (!res.tech) {
         if (!unresolved.has(aid)) unresolved.set(aid, { techniqueId: aid, techniqueName: text(row.techniqueName), rows: 0, reason: res.reason });
         unresolved.get(aid).rows++;
-        if (cap) cap.unresolved.push({ techniqueId: aid, techniqueName: text(row.techniqueName), type, reason: res.reason });
         continue;
       }
       const techId = res.tech.id;
@@ -450,8 +445,7 @@
         }
         continue;
       }
-      const entry = { capId: cap.id, capName: cap.name, group: cap.group, groupName: cap.groupName, type,
-        comments: text(row.comments), references: httpUrls(row.references) };
+      const entry = { capId: cap.id, capName: cap.name, group: cap.group, groupName: cap.groupName, type, comments: text(row.comments) };
       if (res.carried) { entry.from = aid; entry.fromAll = [aid]; }
       if (!entries.has(techId)) entries.set(techId, new Map());
       const per = entries.get(techId);
@@ -472,9 +466,7 @@
       for (const e of list) {
         // older IDs in natural order (T1562, T1562.001, T1562.006)
         if (e.fromAll && e.fromAll.length > 1) { e.fromAll.sort(idOrder); e.from = e.fromAll[0]; }
-        const c = index.capabilities.get(e.capId);
-        c.techniques.add(techId);
-        c.mappings.push({ tech: techId, type: e.type, comments: e.comments, from: e.from || null, fromAll: e.fromAll || [] });
+        index.capabilities.get(e.capId).techniques.add(techId);
       }
     }
     index.ctidTechniques = resolved.size;
@@ -502,20 +494,8 @@
     return out;
   }
 
-  /** KEV CVEs mapped to exactly this technique, one per CVE: [{capId, entry, types:Set, comments:[...]}]. */
-  function cvesFor(index, techId) {
-    const by = new Map();
-    for (const e of index.byTech.get(techId) || []) {
-      if (!by.has(e.capId)) by.set(e.capId, { capId: e.capId, entry: e, types: new Set(), comments: [] });
-      const x = by.get(e.capId);
-      if (e.type) x.types.add(e.type);
-      if (e.comments && !x.comments.includes(e.comments)) x.comments.push(e.comments);
-    }
-    return [...by.values()];
-  }
-
   /**
-   * ATT&CK mitigations of the result sharing techniques with a control or CVE: Map mitSTIX -> n, most shared
+   * ATT&CK mitigations of the result sharing techniques with a control: Map mitSTIX -> n, most shared
    * first, then by ID (fixed-width M1234 IDs, so a plain comparison orders them). mitSets caches each
    * technique's distinct mitigations for one mapExternal run.
    */
@@ -538,8 +518,7 @@
   }
 
   /** Most profile techniques first, then by ID in the index's natural order (index.rank, computed once). */
-  const bySizeThenId = (index, desc) => ([ia, a], [ib, b]) => b.techniques.size - a.techniques.size
-    || (desc ? index.rank.get(ib) - index.rank.get(ia) : index.rank.get(ia) - index.rank.get(ib));
+  const bySizeThenId = index => ([ia, a], [ib, b]) => b.techniques.size - a.techniques.size || index.rank.get(ia) - index.rank.get(ib);
 
   /** Older CTID IDs whose carried-forward entries show in a result (for the list of changed IDs). */
   const addFrom = (set, e) => { for (const id of (e && e.fromAll) || []) set.add(id); };
@@ -581,33 +560,7 @@
         }
       }
     }
-    return { controls: new Map([...controls].sort(bySizeThenId(index, false))), covered, uncovered, nonMappable, viaParentOnly, carriedFrom, index };
-  }
-
-  function mapKev(r, index, mitSets) {
-    const cves = new Map();
-    const covered = new Set(), carriedFrom = new Set();
-    for (const [techId, t] of r.techniques) {
-      for (const e of index.byTech.get(techId) || []) addFrom(carriedFrom, e);
-      for (const x of cvesFor(index, techId)) {
-        let c = cves.get(x.capId);
-        if (!c) {
-          const cap = index.capabilities.get(x.capId);
-          cves.set(x.capId, c = {
-            obj: { id: x.capId, attackId: x.capId, name: x.entry.capName, type: x.entry.group, typeName: x.entry.groupName,
-                   url: NVD_URL + encodeURIComponent(x.capId), kind: 'kev-cve' },
-            techniques: new Set(), roles: new Map(), notes: new Map(), references: cap ? cap.references.slice() : [],
-          });
-          lazyMitigations(c, r, mitSets);
-        }
-        c.techniques.add(techId);
-        c.roles.set(techId, new Set(x.types));
-        if (x.comments.length) c.notes.set(techId, x.comments.join(' '));
-        t.cves.push(x.capId);
-      }
-      if (t.cves.length) covered.add(techId);
-    }
-    return { cves: new Map([...cves].sort(bySizeThenId(index, true))), covered, carriedFrom, index };
+    return { controls: new Map([...controls].sort(bySizeThenId(index))), covered, uncovered, nonMappable, viaParentOnly, carriedFrom, index };
   }
 
   /** 'ok' | 'not-pulled' | 'no-attack-data' (pulled, but no rows for this domain) | 'not-this-domain' */
@@ -618,18 +571,17 @@
   }
 
   /**
-   * Join the CTID mappings to an analyzed result. indexes: { nist, kev } built by indexMappings for this
-   * result's domain (null when the source isn't pulled). Sets r.nist, r.kev, r.mappingStatus, and t.nist /
-   * t.cves (IDs) on every technique entry. Recomputed on every analysis from indexes built once.
+   * Join the CTID mappings to an analyzed result. indexes: { nist } built by indexMappings for this result's
+   * domain (null when the source isn't pulled). Sets r.nist, r.mappingStatus, and t.nist (IDs) on every
+   * technique entry. Recomputed on every analysis from indexes built once.
    */
   function mapExternal(r, indexes) {
     const pick = idx => (idx && idx.domain === r.domain ? idx : null);
-    const nist = pick(indexes && indexes.nist), kev = pick(indexes && indexes.kev);
-    r.mappingStatus = { nist: mappingStatusFor('nist', r.domain, nist), kev: mappingStatusFor('kev', r.domain, kev) };
-    for (const t of r.techniques.values()) { t.nist = []; t.cves = []; }
+    const nist = pick(indexes && indexes.nist);
+    r.mappingStatus = { nist: mappingStatusFor('nist', r.domain, nist) };
+    for (const t of r.techniques.values()) t.nist = [];
     const mitSets = new Map();
     r.nist = r.mappingStatus.nist === 'ok' ? mapNist(r, nist, mitSets) : null;
-    r.kev = r.mappingStatus.kev === 'ok' ? mapKev(r, kev, mitSets) : null;
     return r;
   }
 
@@ -645,7 +597,7 @@
   global.SimEngine = {
     loadModel, analyzeDomain, applyPosture, prioritize, procedures, matrixColumns,
     directTechniqueCount, documentedTechniqueCount, attributedTo, activityPurposes, platformMatch,
-    indexMappings, mapExternal, controlsFor, cvesFor, MAPPING_SOURCES, ATTACK_RELEASED, addedAfterRelease,
+    indexMappings, mapExternal, controlsFor, MAPPING_SOURCES, ATTACK_RELEASED, addedAfterRelease,
     ACTOR_KINDS, CAMPAIGN_KINDS, SELECTION_ORDER,
   };
 })(window);

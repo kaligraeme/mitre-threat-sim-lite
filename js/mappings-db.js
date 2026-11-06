@@ -1,16 +1,18 @@
 /*
- * mappings-db.js — CTID Mappings Explorer data: NIST SP 800-53 Rev 5 controls and CISA KEV CVEs mapped to
- * ATT&CK techniques, pulled from GitHub into a local IndexedDB database of their own (`threatsim-mappings`).
+ * mappings-db.js — CTID Mappings Explorer data: NIST SP 800-53 Rev 5 controls mapped to ATT&CK techniques,
+ * pulled from GitHub into a local IndexedDB database of its own (`threatsim-mappings`).
  *
- * Exposes a global `MappingsDB`. The mappings are kept apart from `mitre-attack-db` on purpose: the Data page,
- * the Threat Profile and Threat Modelling pages treat every row of that database's `meta` store as an ATT&CK or
- * ATLAS knowledge base.
+ * Exposes a global `MappingsDB`. The mappings are kept apart from `mitre-attack-db` on purpose: the Data and
+ * Threat Profile pages treat every row of that database's `meta` store as an ATT&CK or ATLAS knowledge base.
  *
  * Stores
  *   meta     one row per source: version, files, pulled-at, counts           keyPath 'source'
  *   rows     one row per CTID mapping object, key "<source>|<domain>|<n>"     index 'source'
  *   details  NIST control descriptions (optional), key "<source>|<id>"
  *   history  append-only log of pulls
+ *
+ * The meta, rows and history of a source not in SOURCES (another ThreatSim build may have used this browser)
+ * are skipped by every read and left in place; only clearAll() removes them.
  *
  * Mappings Explorer © The MITRE Corporation (Center for Threat-Informed Defense), Apache License 2.0.
  */
@@ -36,14 +38,6 @@
       about: "CTID's mapping of NIST SP 800-53 Rev 5 security controls to the Enterprise ATT&CK techniques they mitigate.",
       matching: 'ThreatSim matches it to the stored Enterprise ATT&CK release by technique ID and follows the ' +
         'replacements of techniques revoked since.' },
-    { id: 'kev', title: 'CISA Known Exploited Vulnerabilities', short: 'KEV', kind: 'cves',
-      framework: 'kev', domains: ['enterprise-attack', 'mobile-attack'], enabled: true,
-      site: SITE + 'external/kev/',
-      about: "CTID's mapping of a selection of CVEs from CISA's Known Exploited Vulnerabilities catalog to the ATT&CK " +
-        "techniques used to exploit them and their impacts. CVEs CTID hasn't mapped don't appear.",
-      matching: 'ThreatSim matches it to the stored ATT&CK releases by technique ID and follows the replacements of ' +
-        'techniques revoked since.',
-      after: 'Mobile CVEs show only when Mobile ATT&CK is pulled and switched on.' },
   ];
 
   /**
@@ -54,7 +48,7 @@
     const s = sourceOf(id);
     if (!s) return '';
     const v = attackVersion ? 'The ' + (which || 'latest') + ' version targets ATT&CK ' + attackVersion + '. ' : '';
-    return [s.about, v + s.matching, s.after].filter(Boolean).join(' ');
+    return [s.about, v + s.matching].filter(Boolean).join(' ');
   }
   for (const s of SOURCES) s.note = noteFor(s.id);
 
@@ -62,8 +56,6 @@
   const PINNED_PATHS = [
     ...['16.1', '14.1', '12.1', '10.1', '9.0', '8.2'].map(a =>
       `mappings/nist_800_53/attack-${a}/nist_800_53-rev5/enterprise/nist_800_53-rev5_attack-${a}-enterprise.json`),
-    ...[['16.1', '07.28.2025'], ['15.1', '02.13.2025']].flatMap(([a, d]) => ['enterprise', 'mobile'].map(dom =>
-      `mappings/kev/attack-${a}/kev-${d}/${dom}/kev-${d}_attack-${a}-${dom}.json`)),
     DESCRIPTIONS_PATH,
   ];
 
@@ -79,10 +71,8 @@
     SC: 'System and Communications Protection', SI: 'System and Information Integrity', SR: 'Supply Chain Risk Management',
   };
 
-  const KEV_TYPES = ['exploitation_technique', 'primary_impact', 'secondary_impact', 'uncategorized'];
   const DOMAIN_OF = { enterprise: 'enterprise-attack', mobile: 'mobile-attack' };
   const DOMAIN_LABEL = { 'enterprise-attack': 'Enterprise', 'mobile-attack': 'Mobile' };
-  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
   // limits that keep a hostile or broken file from swamping the page
   const MAX_BYTES = 64 * 1048576;
@@ -194,12 +184,6 @@
     return m ? m[1].toUpperCase() + '-' + Number(m[2]) + (m[3] ? '(' + Number(m[3]) + ')' : '') : null;
   }
 
-  function cveId(v) {
-    if (typeof v !== 'string') return null;
-    const s = v.trim().toUpperCase();
-    return /^CVE-\d{4}-\d{4,8}$/.test(s) ? s : null;
-  }
-
   function techniqueId(v) {
     if (typeof v !== 'string') return null;
     const s = v.trim().toUpperCase();
@@ -235,29 +219,13 @@
     return out;
   }
 
-  /** KEV catalog dates: '07/28/2025', '7/28/2025' or '07.28.2025' -> '2025-07-28'. */
-  function isoDay(v) {
-    const m = /^(\d{1,2})[/.](\d{1,2})[/.](\d{4})$/.exec(String(v == null ? '' : v).trim());
-    if (!m) return null;
-    const mo = Number(m[1]), d = Number(m[2]);
-    if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
-    return m[3] + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0');
-  }
-  const dayLabel = iso => { const [y, m, d] = iso.split('-'); return Number(d) + ' ' + MONTHS[Number(m) - 1] + ' ' + y; };
-
-  /**
-   * 'rev5@16.1' -> 'Rev 5 · ATT&CK 16.1'; '2025-07-28@16.1' -> 'KEV catalog of 28 Jul 2025 · ATT&CK 16.1'
-   * (short: '28 Jul 2025 · ATT&CK 16.1', for places that already say KEV).
-   */
-  function versionLabel(source, version, short) {
+  /** 'rev5@16.1' -> 'Rev 5 · ATT&CK 16.1'. */
+  function versionLabel(source, version) {
     const m = /^(.+)@(\d+(?:\.\d+)*)$/.exec(String(version));
     if (!m) return String(version);
     if (source === 'nist-800-53-r5') return (m[1] === 'rev5' ? 'Rev 5' : m[1]) + ' \u00b7 ATT&CK ' + m[2];
-    if (source === 'kev' && /^\d{4}-\d{2}-\d{2}$/.test(m[1])) return (short ? '' : 'KEV catalog of ') + dayLabel(m[1]) + ' \u00b7 ATT&CK ' + m[2];
     return String(version);
   }
-
-  const humanize = code => code.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
 
   function compareNum(a, b) {
     const pa = String(a).split('.').map(Number), pb = String(b).split('.').map(Number);
@@ -268,7 +236,7 @@
     return 0;
   }
 
-  /** Newer first: by ATT&CK version, then by framework version (the KEV catalog date). */
+  /** Newer first: by ATT&CK version, then by framework version. */
   function compareVersions(a, b) {
     return compareNum(b.attackVersion, a.attackVersion) || String(b.frameworkVersion).localeCompare(String(a.frameworkVersion));
   }
@@ -276,11 +244,10 @@
   // ---------- discovery ----------
 
   const NIST_RE = /^mappings\/nist_800_53\/attack-(\d+(?:\.\d+)*)\/nist_800_53-rev5\/enterprise\/nist_800_53-rev5_attack-\1-enterprise\.json$/;
-  const KEV_RE = /^mappings\/kev\/attack-(\d+(?:\.\d+)*)\/kev-(\d{2}\.\d{2}\.\d{4})\/(enterprise|mobile)\/kev-\2_attack-\1-\3\.json$/;
 
   /** Paths (with optional blob sizes) -> {<sourceId>: [Version]}, newest first. */
   function versionsFromPaths(entries) {
-    const nist = new Map(), kev = new Map();
+    const nist = new Map();
     const hasDescriptions = entries.some(e => e.path === DESCRIPTIONS_PATH);
     for (const { path, size } of entries) {
       const file = (domain) => ({ domain, url: RAW_BASE + path, size: Number.isFinite(size) && size > 0 ? size : null });
@@ -289,17 +256,9 @@
         const a = m[1];
         nist.set(a, { version: 'rev5@' + a, label: versionLabel('nist-800-53-r5', 'rev5@' + a), attackVersion: a, frameworkVersion: 'rev5',
           files: [file('enterprise-attack')], ...(hasDescriptions ? { descriptionsUrl: RAW_BASE + DESCRIPTIONS_PATH } : {}) });
-      } else if ((m = KEV_RE.exec(path))) {
-        const a = m[1], day = isoDay(m[2]);
-        if (!day) continue;
-        const id = day + '@' + a;
-        if (!kev.has(id)) kev.set(id, { version: id, label: versionLabel('kev', id),
-          attackVersion: a, frameworkVersion: day, files: [] });
-        kev.get(id).files.push(file(DOMAIN_OF[m[3]]));
       }
     }
-    for (const v of kev.values()) v.files.sort((x, y) => (x.domain === 'enterprise-attack' ? -1 : 1) - (y.domain === 'enterprise-attack' ? -1 : 1));
-    return { 'nist-800-53-r5': [...nist.values()].sort(compareVersions), kev: [...kev.values()].sort(compareVersions) };
+    return { 'nist-800-53-r5': [...nist.values()].sort(compareVersions) };
   }
 
   // the reasons are short and bracket-free: the Data page puts them in brackets of its own
@@ -320,9 +279,11 @@
 
   // GitHub allows 60 unauthenticated API calls an hour per address, shared by everything behind it: the Data
   // page reuses a listing it read recently (only the paths that matter, in this browser's localStorage), and
-  // falls back to the last listing it read, whatever its age, when GitHub can't be asked
-  const LISTING_KEY = 'threatsim.ctidListing';
-  const relevant = p => p === DESCRIPTIONS_PATH || NIST_RE.test(p) || KEV_RE.test(p);
+  // falls back to the last listing it read, whatever its age, when GitHub can't be asked. The key is this
+  // edition's own: a ThreatSim build with more sources keeps its longer copy under 'threatsim.ctidListing', and
+  // would take this one for GitHub's whole listing
+  const LISTING_KEY = 'threatsim.ctidListing.lite';
+  const relevant = p => p === DESCRIPTIONS_PATH || NIST_RE.test(p);
   const validEntry = e => isObj(e) && typeof e.path === 'string' && relevant(e.path);
 
   /** This browser's copy of GitHub's listing, { at, entries }, or null when there is none (or it is broken). */
@@ -493,23 +454,13 @@
     if (!av) throw new Error(what + ' has no ATT&CK version.');
     if (av !== version.attackVersion) throw new Error(what + ' maps ATT&CK ' + av + ', not ' + version.attackVersion + ' as its location says.');
     const fvText = shown(m.mapping_framework_version);
-    if (src.framework === 'kev') {
-      if (!fvText) throw new Error(what + ' has no catalog date.');
-      const day = isoDay(fvText);
-      if (!day) throw new Error(what + ' has the catalog date "' + fvText + '", which is not a date.');
-      if (day !== version.frameworkVersion) throw new Error(what + ' is the catalog of ' + dayLabel(day) + ', not ' + dayLabel(version.frameworkVersion) + '.');
-    } else {
-      if (!fvText) throw new Error(what + ' has no framework version.');
-      if (fvText !== version.frameworkVersion) throw new Error(what + ' is for ' + src.title.replace(/ Rev 5$/, '') + ' "' + fvText + '", not ' + version.frameworkVersion + '.');
-    }
+    if (!fvText) throw new Error(what + ' has no framework version.');
+    if (fvText !== version.frameworkVersion) throw new Error(what + ' is for ' + src.title.replace(/ Rev 5$/, '') + ' "' + fvText + '", not ' + version.frameworkVersion + '.');
     if (doc.mapping_objects.length > MAX_OBJECTS) throw new Error(what + ' has too many mapping objects (' + doc.mapping_objects.length.toLocaleString('en') + ').');
   }
 
   /** CTID mapping objects -> rows (see the header); objects that don't validate are counted and skipped. */
   function normalizeFile(src, domain, doc) {
-    const meta = doc.metadata;
-    const groupNames = isObj(meta.capability_groups) ? meta.capability_groups : {};
-    const controls = src.kind === 'controls';
     const rows = [];
     let skipped = 0;
     for (const o of doc.mapping_objects) {
@@ -517,29 +468,14 @@
       const tech = techniqueId(o.attack_object_id);
       if (!tech) { skipped++; continue; }
       const raw = o.capability_id;
-      const capId = raw == null || raw === '' ? null : controls ? nistId(raw) : cveId(raw);
+      const capId = raw == null || raw === '' ? null : nistId(raw);
       if (raw != null && raw !== '' && !capId) { skipped++; continue; }
-      if (!capId && !controls) { skipped++; continue; }   // a KEV row needs a CVE
-      if (controls && capId && !NIST_FAMILIES[capId.slice(0, 2)]) { skipped++; continue; }   // not a Rev 5 family
+      if (capId && !NIST_FAMILIES[capId.slice(0, 2)]) { skipped++; continue; }   // not a Rev 5 family
 
-      let group = typeof o.capability_group === 'string' && /^[A-Za-z0-9_.-]{1,40}$/.test(o.capability_group.trim())
-        ? o.capability_group.trim() : null;
-      if (controls && capId) group = capId.slice(0, 2);   // the family is the ID's prefix
-      if (!capId) group = null;
-      let groupName = null;
-      if (controls && group) groupName = NIST_FAMILIES[group];   // the Rev 5 name, never the file's (see NIST_FAMILIES)
-      else if (group) {
-        const given = Object.prototype.hasOwnProperty.call(groupNames, group) ? plain(groupNames[group], 120) : '';
-        groupName = given || humanize(group);
-      }
-
-      const typeRaw = typeof o.mapping_type === 'string' ? o.mapping_type.trim().toLowerCase() : '';
-      let mappingType = null;
-      if (capId) {
-        // CTID called the NIST relation 'protects' up to ATT&CK 14.1 and 'mitigates' since
-        if (controls) mappingType = 'mitigates';
-        else mappingType = KEV_TYPES.includes(typeRaw) ? typeRaw : 'uncategorized';
-      }
+      const group = capId ? capId.slice(0, 2) : null;   // the family is the ID's prefix
+      const groupName = group ? NIST_FAMILIES[group] : null;   // the Rev 5 name, never the file's (see NIST_FAMILIES)
+      // CTID called the NIST relation 'protects' up to ATT&CK 14.1 and 'mitigates' since
+      const mappingType = capId ? 'mitigates' : null;
       const statusRaw = typeof o.status === 'string' ? o.status.trim().toLowerCase() : '';
       const status = !capId ? 'non_mappable' : /^[a-z_]{1,32}$/.test(statusRaw) && statusRaw !== 'non_mappable' ? statusRaw : 'complete';
 
@@ -651,8 +587,8 @@
 
     onProgress('Writing to local database…', null);
     await nextTick();
-    // rows: every stored object; mapped: those with a control or CVE, of which pairs are distinct (CTID's NIST
-    // file repeats some); techniques: those with a control or CVE; nonMappable: techniques CTID judged no control maps to
+    // rows: every stored object; mapped: those with a control, of which pairs are distinct (CTID's NIST file
+    // repeats some); techniques: those with a control; nonMappable: techniques CTID judged no control maps to
     const byDomain = {};
     const caps = new Set(), techs = new Set(), pairs = new Set(), unmappable = new Set();
     let mapped = 0;
@@ -705,25 +641,30 @@
 
   // ---------- reads ----------
 
+  // rows of a source not in SOURCES are skipped (see the header)
+  const listed = x => isObj(x) && !!sourceOf(x.source);
+
   async function getMeta(id) {
     const db = await open();
+    if (!sourceOf(id)) return null;
     return (await req(db.transaction('meta').objectStore('meta').get(id))) || null;
   }
 
   async function getAllMeta() {
     const db = await open();
-    return req(db.transaction('meta').objectStore('meta').getAll());
+    return (await req(db.transaction('meta').objectStore('meta').getAll())).filter(listed);
   }
 
   async function getHistory(limit = 50) {
     const db = await open();
     const all = await req(db.transaction('history').objectStore('history').getAll());
-    return all.reverse().slice(0, limit);
+    return all.reverse().filter(listed).slice(0, limit);
   }
 
   /** Everything stored for one source: { meta (null when not pulled), rows: [row], details: [detail] }. */
   async function loadSource(id) {
     const db = await open();
+    if (!sourceOf(id)) return { meta: null, rows: [], details: [] };
     const tx = db.transaction(['meta', 'rows', 'details']);
     const range = sourceRange(id);
     const [meta, rows, details] = await Promise.all([
@@ -750,6 +691,6 @@
     open, fetchUpstreamIndex, pullSource, getMeta, getAllMeta, getHistory, loadSource, clearAll,
     compareVersions, versionLabel, versionFromMeta, noteFor,
     // exposed for tests and for pages that show the same IDs
-    nistId, cveId, plain, htmlToText, refUrls, versionsFromPaths, normalizeFile,
+    nistId, plain, htmlToText, refUrls, versionsFromPaths, normalizeFile,
   };
 })(window);

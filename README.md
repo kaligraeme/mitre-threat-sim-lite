@@ -1,27 +1,26 @@
 # ThreatSim · MITRE ATT&CK and ATLAS data instance
 
+This is the lite edition of ThreatSim: it has no Threat Modelling tab and no CISA KEV mappings.
+
 A browser-based cyber threat simulator. It keeps a local copy of the MITRE ATT&CK **Enterprise** and
 **ICS** datasets (Mobile is available but off by default) and of **MITRE ATLAS**, the knowledge base of
 threats to AI systems. It maps ATT&CK Groups, Software and Campaigns, and ATLAS Case Studies, Entities and
 Software, to the techniques they use, then to the relevant mitigations and detections. It also maps the
-profile's techniques to **NIST SP 800-53 Rev 5** controls and to CVEs in **CISA's Known Exploited
-Vulnerabilities** catalog, using the Center for Threat-Informed Defense's (CTID) published mappings.
+profile's techniques to **NIST SP 800-53 Rev 5** controls, using the Center for Threat-Informed Defense's
+(CTID) published mappings.
 
 ## Pages
 
 - **Sign in** (`login.html`): the only page anyone can open without signing in.
-- **Data** (`index.html`): pull MITRE ATT&CK and ATLAS releases, and CTID's NIST 800-53 and KEV
-  mappings, into the local database.
+- **Data** (`index.html`): pull MITRE ATT&CK and ATLAS releases, and CTID's NIST 800-53 mappings, into
+  the local database.
 - **Threat Profile** (`simulator.html`): build a threat profile and map it to mitigations and detections.
-- **Threat Modelling** (`threatmodel.html`): threat-model an architecture or network diagram with that
-  profile, to the CSA Guide to Cyber Threat Modelling, and download the threat register and the
-  data-flow diagram with threats.
 
 ## Sign-in
 
 ThreatSim runs behind its own small server, `server.py`, which checks the session on every request.
 Until you sign in it serves only the sign-in page and the stylesheet and script that page needs. The
-Data page, the Threat Profile and Threat Modelling pages and all their scripts are refused: pages redirect to sign-in, anything else
+Data and Threat Profile pages and all their scripts are refused: pages redirect to sign-in, anything else
 gets 401. Run it as described under [Run](#run). Don't serve the folder with any other web server:
 anyone could then download the app's files without signing in. (The pages notice and refuse to start,
 and the sign-in page says why, but the files are out.)
@@ -29,8 +28,7 @@ and the sign-in page says why, but the files are out.)
 - **First sign-in:** username `admin`, password `admin`. Until that password is changed, the server
   warns when it starts and every page shows a banner. **Change password** is in the page header. The
   new password needs at least 8 characters and can't be the current one, the username or `admin`.
-  Changing it ends that account's sessions in other browsers, and any Claude job they had running, and
-  gives this browser a new session.
+  Changing it ends that account's sessions in other browsers and gives this browser a new session.
 - **Sessions** are a random token in an HttpOnly cookie (SameSite=Lax, and Secure over HTTPS), kept in
   the server's memory. A session ends after 12 hours without use, or when you sign out, which also
   takes this browser's other ThreatSim tabs to the sign-in page. It also ends when the password is
@@ -43,7 +41,7 @@ and the sign-in page says why, but the files are out.)
 - **Passwords** are stored only as PBKDF2-HMAC-SHA-256 hashes (310,000 iterations, random salt) in
   `users.json` (mode 600). By default it lives outside the app folder, in `~/.local/share/threatsim`
   (`$XDG_DATA_HOME/threatsim` if that is set, `%LOCALAPPDATA%\threatsim` on Windows); `--data-dir` puts
-  it elsewhere. The server never serves anything but the app's pages, `css/`, `js/` and `examples/`.
+  it elsewhere. The server never serves anything but the app's pages, `css/` and `js/`.
 - **Forgotten password, or another account:** `python3 server.py --set-password admin` (or a new
   username) asks for a new password. You can run it while the server is running; that account's
   sessions end.
@@ -83,8 +81,8 @@ maps it to mitigations and detections.
      **Mark top 5**, to see how much exposure is left.
    - **Telemetry:** the data components and log sources the detections rely on.
    - **ICS assets:** assets targeted by the profile's ICS techniques.
-   - **800-53** and **KEV:** the NIST SP 800-53 Rev 5 controls that mitigate the profile's techniques,
-     and the known exploited CVEs mapped to them (see [Control and vulnerability mappings](#control-and-vulnerability-mappings-ctid)).
+   - **800-53:** the NIST SP 800-53 Rev 5 controls that mitigate the profile's techniques (see
+     [Control mappings](#control-mappings-ctid)).
    - Click any row or matrix cell for details: procedure examples, mitigation guidance, and analytics
      with their log sources. ATLAS details add technique maturity, mitigation categories and AI
      lifecycle phases, attribution with its activity purpose, the matching ATT&CK object where ATLAS
@@ -123,32 +121,29 @@ scores share a priority number and are ordered by reach, documented procedure ex
 so the result doesn't depend on the order you picked threats in. Your selections and
 posture are saved in the browser's localStorage.
 
-## Control and vulnerability mappings (CTID)
+## Control mappings (CTID)
 
-The Data page pulls two datasets from CTID's
+The Data page pulls one dataset from CTID's
 [Mappings Explorer](https://github.com/center-for-threat-informed-defense/mappings-explorer)
-(Apache 2.0), in a second group of cards, *Control and vulnerability mappings (CTID)*:
+(Apache 2.0), in a second group of cards, *Control mappings (CTID)*:
 
 - **NIST SP 800-53 Rev 5:** which security controls mitigate the Enterprise ATT&CK techniques CTID
   mapped (with CTID's comment where it gave one, which is rare, and a list of techniques it judged not
   mappable), and (when available) NIST's description of each control. Techniques added to ATT&CK after
   the release CTID mapped have no controls.
-- **CISA Known Exploited Vulnerabilities:** for a selection of the CVEs in CISA's catalog, the ATT&CK
-  techniques used to exploit each one and its primary and secondary impacts. CTID has mapped only part of
-  the catalog (419 Enterprise and 14 Mobile CVEs, 424 in all, in its 28 Jul 2025 files): a CVE that isn't
-  listed hasn't been mapped by CTID, which doesn't mean it isn't exploited.
 
-They take part in the same Pull, version pickers, *Re-pull*, history and *Clear local database* as the
-MITRE data, and are stored in a browser database of their own (`threatsim-mappings`). CTID publishes no
+It takes part in the same Pull, version picker, *Re-pull*, history and *Clear local database* as the
+MITRE data, and is stored in a browser database of its own (`threatsim-mappings`). CTID publishes no
 index of its files, so the page reads GitHub's file listing (api.github.com allows 60 unauthenticated
 calls an hour; the page reuses a listing it read in the last hour, and **Check for updates** reads it
 again). If the listing can't be read, the page uses the files known when ThreatSim was written and says
-so: newer files may exist.
+so: newer files may exist. Mappings of a dataset this edition doesn't offer, left in the browser by
+another edition of ThreatSim, are ignored, and only *Clear local database* removes them.
 
-**Matching to ATT&CK.** CTID mapped these to ATT&CK 16.1 (older versions to older releases); ThreatSim
-matches them to the stored ATT&CK release by technique ID. A technique ATT&CK has since revoked is
+**Matching to ATT&CK.** CTID mapped NIST 800-53 to ATT&CK 16.1 (older versions to older releases);
+ThreatSim matches it to the stored ATT&CK release by technique ID. A technique ATT&CK has since revoked is
 carried forward to its replacement (for example T1562.001 is now T1685); an ID with no current technique
-is listed as not current and left out. Each tab, and the workpaper's summary, list those IDs.
+is listed as not current and left out. The 800-53 tab, and the workpaper's summary, list those IDs.
 
 On the Threat Profile tab:
 
@@ -158,21 +153,14 @@ On the Threat Profile tab:
   also counts for a control CTID mapped to its parent technique, marked *via parent* (ThreatSim's rule,
   not CTID's), unless CTID judged that sub-technique not mappable; a control mapped only to a
   sub-technique never counts for the parent.
-- **KEV** (Enterprise and Mobile, exact technique matches only): the CVEs mapped to profile techniques,
-  with each technique's role (exploitation technique, primary impact, secondary impact). CTID links CVEs
-  to techniques, not to threat groups: a CVE is listed because the profile uses one of its techniques,
-  not because the selected threats are known to exploit it, nor because it is in your systems. CVEs whose
-  exploitation technique is in the profile come first, and **Only CVEs exploited through a profile
-  technique** hides the rest. Mobile CVEs need Mobile ATT&CK pulled and switched on.
 - **Related ATT&CK mitigations** are ThreatSim's own link, not part of CTID's mapping: the profile's
-  ATT&CK mitigations that address the same techniques as a control or CVE.
+  ATT&CK mitigations that address the same techniques as a control.
 - Drawers: a control shows NIST's description, the profile techniques it mitigates with CTID's notes and
-  the related mitigations; a CVE shows its techniques by role, references, and links to the NVD and the
-  CISA catalog; technique details list their controls and CVEs, and mitigation details list the controls
-  for the same techniques.
-- ICS ATT&CK and ATLAS have no such mappings, and their results say so.
+  the related mitigations; technique details list their controls, and mitigation details list the
+  controls for the same techniques.
+- Mobile ATT&CK, ICS ATT&CK and ATLAS have no such mappings, and their results say so.
 
-NIST SP 800-53 is a NIST publication; the KEV catalog is CISA's.
+NIST SP 800-53 is a NIST publication.
 
 ## Excel workpaper
 
@@ -191,7 +179,6 @@ profile and posture to an `.xlsx` workbook:
 | Analytics | One row per analytic log source: what to collect and what to look for, with the strategy's live deployment status |
 | Control Map | Each technique-to-control link, with the control's live status and how the mitigation applies |
 | NIST 800-53 | One row per NIST SP 800-53 Rev 5 control that CTID maps to a profile technique or to its parent technique (ThreatSim's roll-up, marked *via*): the techniques it mitigates (and how many through a parent technique), live counts of the gaps it addresses and of the techniques not fully covered, related ATT&CK mitigations and how many are in place (live), and CTID's comment where it gave one (rare) |
-| Known Exploited CVEs | One row per CVE, role and profile technique: the CVE (linked to the NVD), the vulnerability and its type, the technique's role, the technique's live coverage, CTID's note and references |
 
 The drop-downs start at the posture you set in ThreatSim. Everything that depends on them is a formula:
 technique coverage, the readiness figures and bars, the matrix status column and the columns marked
@@ -200,12 +187,12 @@ technique coverage, the readiness figures and bars, the matrix status column and
 statuses in ThreatSim and export again. Controls with equal priority scores share a priority number and
 are listed by reach, documented procedure examples, then ID.
 
-The NIST 800-53 and Known Exploited CVEs sheets inform but don't change readiness; the summary's
-*Mappings (CTID)* row names the datasets and versions, and lists technique IDs carried forward or not
-current. *Profile at a glance* counts the controls and CVEs and the profile techniques with no 800-53
-control. When a mapping is used, the summary also carries source and licence rows for CTID's Mappings
-Explorer (Apache 2.0), NIST SP 800-53 and CISA's KEV catalog. Each sheet is always present and says why
-when it has no rows (not pulled, no Enterprise or Mobile techniques, nothing mapped).
+The NIST 800-53 sheet informs but doesn't change readiness; the summary's *Mappings (CTID)* row names
+the dataset and version, and lists technique IDs carried forward or not current. *Profile at a glance*
+counts the controls and the profile techniques with no 800-53 control. When the mapping is used, the
+summary also carries source and licence rows for CTID's Mappings Explorer (Apache 2.0) and NIST SP 800-53.
+The sheet is always present and says why when it has no rows (not pulled, no Enterprise techniques,
+nothing mapped).
 
 Workbooks that include ATLAS name each domain by its own title (for example *ATLAS v2026.10*), show
 each ATLAS threat's case type and activity purpose, note that ATLAS's detection controls are
@@ -223,250 +210,15 @@ The workbook is built in the browser with [ExcelJS](https://github.com/exceljs/e
 export. ATLAS YAML is parsed with [js-yaml](https://github.com/nodeca/js-yaml) 4.3.2 (MIT,
 `js/vendor/js-yaml.min.js`, licence in `js/vendor/js-yaml.LICENSE.txt`) on the Data page.
 
-## Threat Modelling
-
-The **Threat Modelling** tab carries out cyber threat modelling to the *Guide to Cyber Threat Modelling*
-of the Cyber Security Agency of Singapore (CSA), Section 3, over an architecture or network diagram. It
-uses the threat profile built on the Threat Profile tab as the Sectorial Threat Profile, and produces the two
-deliverables a CSA threat model is judged on. It is a port of the `cyber-threat-modelling` skill's
-method (STRIDE-LM gates, severity scoring, ATT&CK attack modelling), driven by ThreatSim's own MITRE data.
-
-1. **Threat profile.** The groups, software and campaigns (ATT&CK) and case studies, entities and
-   software (ATLAS) picked on the Threat Profile tab. With no profile, a generic external attacker is assumed.
-   The Threat Profile tab's platform filter and knowledge-base switches don't apply here: techniques are matched
-   to each element's own platforms, and the profile card says so.
-2. **Architecture diagram.** Choose a file or drop it on the page:
-
-   | File | How it is read |
-   |---|---|
-   | draw.io: `.drawio` or `.xml` (compressed or not), or a draw.io `.png` / `.svg` export, which carries the diagram | Shapes are elements (CSA Figure 3: rectangle = external entity, ellipse = process, double ellipse = cluster of processes, cylinder = data store; for icons and plain boxes the style and the label decide), connectors are data flows, large dashed containers are trust zones. An element's draw.io properties (*Edit Data*) `purpose`, `sensitivity`, `auth`, `trust`, `crown_jewel`, `ai` and `type` are read as its context. A word with a connector attached is an element too, unless it reads as a note (a number, a sentence, 'Note:'); a connector that ends on another connector joins its flow, and one dropped on a zone's title ends on the zone. In a file with several pages, the page with the most data flows is read and the page says which; copy another page into a file of its own to model it. A page that is only a pasted picture is read as a picture. |
-   | PowerPoint `.pptx` | The first visible slide drawn with shapes and connectors (a hidden slide only when no visible one has a diagram), read the same way: any shape, freeform or text box with a connector attached is an element, except callouts, block arrows and numbered markers; two concentric circles are a cluster; text next to a connector, in a text box or a shape with no fill or outline, is its label. A slide that is only a picture is read as a picture. |
-   | Picture: `.png`, `.jpg`, `.gif`, `.webp` | A picture has no shapes to read. Decompose it by hand on the page, or have Claude read it when the server allows (see below). |
-   | `.json` | A decomposition saved from this page. |
-
-   **Load the example** opens `examples/sovereign-ai-architecture.drawio`: the Sovereign AI reference
-   architecture (a single picture in its source deck) re-modelled as a CSA data-flow diagram, with each
-   element's context filled in. Visio files: open them in draw.io and export as XML.
-3. **System decomposition** (CSA §3.2). Check the elements, data flows and trust zones that were read,
-   and edit them. Fill in each element's context: what it does, the data it holds, how it authenticates,
-   how far it is trusted. This drives the threats and their severity more than anything else. Elements
-   are crown jewels and AI elements when their context says so, unless you set them. **Load component
-   context** takes a JSON object keyed by element name or id, as the skill's `component_context.json`;
-   its values replace what the elements had, and the page says how many it filled in and whose it
-   replaced. The decomposition stays in this browser between visits, for the signed-in user only
-   (pictures don't), and tabs open on the page share it; **Save the decomposition** downloads it.
-   Replacing or clearing it asks first. The last ten removals, and a loaded context file, can be undone,
-   latest first, with **Undo** at the foot of the editor or Ctrl+Z (⌘Z on a Mac) outside a text field.
-
-   **The DFD check.** As soon as a decomposition is set (a draw.io, PowerPoint or JSON file, the example,
-   Claude's reading of a picture, a picture decomposed by hand, or the decomposition restored from your
-   last visit), the page checks it with the method of the `architecture-to-drawio-dfd` skill (its
-   `dfd_drawio.py`, ported to `js/tm-dfdcheck.js`). A **DFD check** panel above the editor shows:
-   - **The fixes it makes itself.** An element drawn in another trust zone than the one it was given is
-     put in the innermost zone its centre is drawn in. One centred exactly on a border of its own zone (a
-     firewall drawn on the boundary between two zones, whatever their sizes, or on the edge of a zone
-     inside its own) keeps its zone: a redraw moves it inside that zone, and a layout kept as drawn lists
-     it as straddling that border.
-     When every element and zone has a position, the layout is redrawn in CSA notation: scaled to about
-     2,200 px wide from the drawing's own width (a picture Claude read is scaled from the picture's
-     width, as the skill does), each element at the standard size for
-     its type, centred where the diagram draws it, elements that would overlap moved apart inside their
-     zone, and zones enlarged where they no longer fit what they hold. A picture Claude read is always
-     redrawn, as the DFD method lays out what it reads, and what is still wrong is listed. Any other
-     diagram is redrawn unless the redrawn layout would have more problems with where things are drawn in
-     all (elements overlapping, outside or across the border of their trust zone, or inside one they
-     aren't in; trust zones overlapping) than the diagram as drawn: then it keeps its own layout, and the
-     panel says what the redraw would add and offers **Redraw in CSA notation anyway**. A decomposition
-     laid out already (by this page, or a file the skill wrote) isn't scaled again. Every trust zone is
-     made at least 20,400 px², as the `cyber-threat-modelling` skill's parser takes a dashed box under
-     20,000 px² for an element unless its name has a zone word (a fix of its own when the diagram keeps its
-     layout). A ★ after an element's name is read as the crown-jewel mark. **Undo the fixes** puts back
-     the zones and the layout as read, small zones included (see the draw.io file below); your other
-     edits stay. **Apply the fixes** makes them again.
-   - **What is left to look at**, errors first, each with what to do and a button that opens the editor
-     at the row concerned: data flows that don't join two elements, elements with no data flow, elements
-     outside every trust zone (not external entities, which usually are), trust zones that hold nothing,
-     no trust zones at all, elements drawn outside their zone, on a zone's border or overlapping, elements
-     with no context, no crown jewel marked, and names missing or used twice. The check never adds a data
-     flow, or puts an element in a zone, that the diagram doesn't show. It runs again as you edit, so a
-     finding goes as soon as it is fixed, and a screen reader hears how much is left when that changes,
-     except when the editor's status line already speaks for the edit (a removal, Undo or Ctrl+Z, a flow
-     reversed, a context file loaded, changes made in another tab): then the new count is shown in the
-     panel only, and a screen reader hears the count again when it next changes.
-     None of these stops the threat model; the line under **Run** says how many are still open. The threat
-     model and both deliverables use the decomposition as checked.
-   - **A preview of the DFD in CSA notation**, with a picture Claude read shown beside it so the two can
-     be compared. An element added by hand, or moved to another zone, has no position from the diagram:
-     the preview and the draw.io file put it in a free spot of its zone, and when the zone is full they
-     make room in it: everything below that spot (or to its right) moves along and the zones across that
-     line grow, so no other element changes zone and no zone comes to overlap another. Where a zone that
-     partly overlaps this one would grow along with it, the room is made just before or past that zone
-     instead. The drawing may get bigger. An element in no zone (added so, or moved out of its zone) goes
-     below the diagram, and so would one in a zone that other zones cover entirely, which leaves no room
-     to make. In a decomposition saved with some positions and not others, what is in a zone with no
-     position is laid out with that zone.
-   - Two downloads that go together:
-     - **Download as draw.io (CSA DFD)**, `<system>-dfd.drawio`: the skill's draw.io file, with blue CSA
-       shapes, red dashed trust zones and dark-red outer zones, connectors glued to their elements, a ★
-       after a crown jewel's name, and each element's type, purpose, sensitivity, authentication, trust,
-       crown-jewel and AI flags as its draw.io properties (*Edit Data*). It opens in draw.io. For tools
-       that read only the shapes, two style keys are added to the skill's: `shape=csaActor` on external
-       entities (draw.io has no shape of that name and draws its plain rectangle) and `double=1` on
-       clusters (draw.io ignores it on a double ellipse). An element drawn at 20,000 px² or more (only a
-       diagram that keeps its own layout has one: every standard size is smaller) whose name has a zone
-       word (network, cloud, internal, tier…) gets draw.io's default fill, as the skill's parser takes a
-       large box with no fill and such a name for a trust zone. An element centred exactly on the border
-       of a zone it isn't in is written a pixel inside its own zone, so readers that go by the centre put
-       it there. An element centred where two zones inside its own zone meet can't be moved out of both:
-       the file puts it in one of them.
-       For the decomposition as checked, with the check's fixes standing, the `cyber-threat-modelling`
-       skill's parser (`parse_drawio.py`) reads from it every element's type (from its shape) and trust
-       zone (from where it is drawn), every trust zone, and every data flow's ends and label, as the check
-       has them (tested on the example and the test diagrams, and on edits of them); the names of crown
-       jewels end in " ★" there. It doesn't read the properties. After **Undo the fixes** the file has the
-       diagram's own zones and positions, and that parser reads a dashed zone under 20,000 px² whose name
-       has no zone word as an element (what it holds goes in the zone round it, if there is one).
-     - **Download component context (JSON)**, `<system>-dfd-context.json`: each element's name, type,
-       purpose, sensitivity, authentication and trust (and its crown-jewel and AI flags, when set), keyed
-       by its id in the draw.io file, in the form of that skill's `component_context.json`. A field left
-       empty isn't written, so the skill uses its own words for it (an attacker "defeating its
-       authentication mechanism", "sensitive" data) rather than a blank. Give the skill both files (its
-       `--drawio` and `--context`). The skill rates an element a crown jewel by words in its name and
-       context (restricted, classified, PII, personal data, payment, card, financial, health, secret,
-       credential…), not by the ★ or the crown-jewel flag; the page adds no words to your context, so say
-       in an element's sensitivity what makes it a crown jewel.
-
-     A decomposition downloaded as checked and uploaded here again has nothing to fix (rarely, an element
-     written a pixel inside its zone comes to touch a neighbour there, and the upload is then redrawn).
-     After **Undo the fixes** the file has the diagram's own positions, so an element the panel lists as
-     drawn in another zone than its own is read, here and by the skill, in the zone it is drawn in; uploaded
-     here again, the file is fixed again, as the diagram was.
-4. **Threat model** (CSA §3.3), built in the browser in well under a second:
-   - **Sectorial Threat Profile.** The profile's ATT&CK techniques are grouped into themes (edge
-     exploitation, network-device compromise, virtualisation, credential abuse, cloud, implants,
-     anti-forensics, host compromise, lateral movement, data theft, disruption, supply chain, covert
-     C2). Each theme the profile uses is an item, STP-1, STP-2…, with MITRE's procedure examples as
-     its evidence. Crown-jewel theft is added, marked *extrapolated*, when the profile records none.
-   - **STRIDE-LM walk.** Every element is walked against all seven categories through the skill's two
-     gates: the structural one (STRIDE-per-element: an external entity can only be spoofed or fail to
-     be held to account; a data store can't be spoofed or elevate privilege) and the contextual one
-     (its context, its place in the flow graph, the lens). A threat event is raised where a profile
-     theme bears on the element: at most one per category, two to five per element (more for exposed
-     crown jewels). Every other applicable cell is listed as an omission for the analyst to review.
-   - **ATT&CK.** Each event cites the profile's own techniques first (◆), suited to the element (network
-     devices, ESXi, containers, cloud…), then generic STRIDE-LM ones. Mitigations (M-IDs) and detection
-     strategies with their data sources come from the same local MITRE data, so every ID is one MITRE
-     publishes.
-   - **Severity** is the skill's score: what the category costs if it lands, what is at stake (crown
-     jewel +3, sensitive data +1), exposure, and the profile agreeing. High from 6, Medium from 4. It
-     is a triage aid, not a risk rating.
-   - **Attack sequences** (the CSA Table of Attack) follow the data-flow graph, in either direction,
-     from the elements an attacker can reach (the DMZ, Internet-facing systems, supplier links) through
-     threat-event locations to the crown jewels; every crown jewel with such a route ends one, up to
-     seven. A sequence, step or threat event whose technique MITRE doesn't record for the profile's
-     actors is marked *extrapolated*, and so is a row raised with generic techniques where a profile
-     theme bears on an element but none of the actor's techniques fits it.
-   - **AI elements** (models, training, inference, feature and vector stores, agents, MLOps) also get the
-     AI pass: MAESTRO layers L1–L7 and AI threat events with MITRE ATLAS techniques, mitigations and case
-     studies, numbered after the ATT&CK locations, with AI attack sequences. It needs ATLAS pulled on the
-     Data page.
-5. **Deliverables**, both from the same run, so they can't disagree:
-   - **Threat register**, `Cyber_Threat_Modelling_Register.xlsx`: *Threat Register* (one row per threat
-     event: S/n coloured by severity, threat (STP), techniques, STRIDE-LM category, threat actor,
-     sequence of attack, threat event, component with its DFD number and zone, mitigations, detections;
-     the AI rows after a separator), *Table of Attack (CSA)*, *AI Table of Attack (MAESTRO)*, *STRIDE-LM
-     Coverage*, *Threat Profile*, *AI Threat Profile (MAESTRO)*, *MAESTRO Coverage* and *About*
-     (method, scope, verification, how to read severity, assumptions and limits, sources). No merged
-     cells, so it filters and sorts.
-   - **Data-flow diagram with threats**, `Dataflow_Diagram_with_Threats.pptx`, in the CSA design: external
-     entities as rectangles, processes as circles, clusters as double circles, data stores as cylinders,
-     data flows as arrows with their labels, trust boundaries as red dashed lines, crown jewels with a
-     yellow star, and each threat-event location as a red octagon with its DFD number. Figure 1 is the
-     whole DFD; then one slide per attack sequence, with the path highlighted and the rest faded; then
-     the AI threats and the AI attack sequences. When the diagram had positions (draw.io, PowerPoint, or
-     a picture read by Claude), the DFD keeps its layout, as the DFD check left it; otherwise it is laid
-     out in rows of zones.
-
-   The workbook is built with ExcelJS (above) and the deck with
-   [PptxGenJS](https://github.com/gitbrent/PptxGenJS) 4.0.1 (MIT, `js/vendor/pptxgen.bundle.js`, which
-   includes JSZip; licences in `js/vendor/pptxgen.LICENSE.txt`). Both load only when first needed.
-
-   The last run's results, Claude's text included, are kept in this browser for the signed-in user
-   (IndexedDB) and come back on the next visit, marked out of date if the decomposition, the profile or
-   the MITRE data has changed since. Replacing or clearing the decomposition drops them.
-
-The register and diagram are a rigorous first pass for an analyst, not a finished assessment: scope
-(CSA §3.1), existing controls and full attack scenarios remain the analyst's.
-
-### Claude (optional)
-
-If the server's operator sets `ANTHROPIC_API_KEY` and installs the Anthropic Python SDK
-(`pip install -U "anthropic>=0.108"`, Python 3.10 or later), the tab can also:
-
-- **Read the picture with Claude:** read a picture of a diagram into a decomposition, with positions
-  taken from the picture, for you to check. Claude is asked to follow the DFD method's rules for reading
-  a picture (this has been tested against a mock of the API only): trust zones are the containers that
-  mark a change in trust (a network segment, a DMZ, a cloud account, a third party's area, a national or
-  sovereign boundary…), not those that only group things; external entities include external SaaS and
-  the Internet; an element's box is its icon or shape (not icon and caption) and its centre decides its
-  zone; a caption's second line goes in purpose; an inference is allowed only when marked "(assumed)"; a
-  bus or fan-out line becomes one flow per pair it joins (beyond about 12, one to the nearest
-  representative element, said in the notes); flows join elements, never zones; and likely crown jewels
-  are proposed in its notes for you to confirm. The DFD check (step 3) then redraws the reading.
-- **Have Claude write the threat events in more detail:** rewrite each event's title, sequence of
-  attack and description, and each attack sequence's narrative, for this system and this threat actor.
-
-Technique IDs, mitigations, detections and severities never come from Claude. A rewritten field is
-dropped, and the engine's own text kept, if it names an ATT&CK or ATLAS ID (technique, mitigation, group,
-software, campaign, case study) or a CVE that its event doesn't carry, or holds a link or an e-mail
-address.
-
-The detail box starts unticked; the browser remembers each user's own choice. Events and attack
-sequences Claude rewrote are marked *by Claude*, or *partly by Claude* where some of its text was refused,
-and the register's *About* sheet lists the rows holding Claude's text: review its wording before relying
-on it. An answer that isn't the shape asked for (a field of the wrong kind, a coordinate out of range)
-isn't used, and the page says so.
-
-**What is sent:** only when a signed-in user presses **Read the picture with Claude**, or runs the
-threat model with the detail box ticked: the picture, or the decomposition (element names and context)
-and the draft register text, go to Anthropic's API. Diagram text is sent as data, not instructions, and
-only answers for the events that were sent are kept. Characters a reader can't see (zero-width and bidi
-controls, tag characters, variation selectors) are left out of what is sent, and the log says how many.
-A picture is redrawn before it is sent (PNG, or JPEG if large; at most 2576 px on the long edge and 3.75
-megapixels), so the file's own metadata isn't sent. Without the key or the SDK nothing is sent anywhere
-and the controls don't appear; an SDK that fails to load, or is older than 0.108, leaves Claude off,
-and the server says why when it starts.
-
-The server uses `claude-opus-5-5` (set `THREATSIM_CLAUDE_MODEL` for another), with adaptive thinking and
-structured JSON output, and opts into Anthropic's server-side fallback, so a request a safety classifier
-declines is retried on the model Anthropic recommends for it (`THREATSIM_CLAUDE_FALLBACK=off` stops this,
-for an account or API gateway that refuses it; the start-up line says whether it is on). Calls run as
-background jobs that the page checks every few seconds, so a proxy's read timeout doesn't cut them off:
-one at a time per user (a second request waits for the first and offers to cancel it), three started at
-a time per server (at most 8 more may be uploading), and at most 100 started per user in 24 hours (set
-`THREATSIM_CLAUDE_JOBS_PER_DAY`; `0` for no limit). A picture may take as long as it needs to upload on
-a slow line while it keeps coming: after 15 seconds it must average 8 KB/s, and 30 seconds without data
-ends it. While a job runs the page shows its progress and a **Cancel** button. A job stops after 15
-minutes and keeps what it has done. Leaving the page (closing it, reloading, or going to another tab of
-the app) stops it too, and so does signing out, or a password change that ends the session that started
-it; coming back in the same browser tab, the page picks up what the job did and says what stopped it. A
-result waits on the server for 15 minutes, or until the page has used it. One enrichment holds at most
-400 threat events and 50 attack sequences: the page sends the first ones and the rest keep the engine's
-text. Each call costs money on the operator's Anthropic account; the server logs one line per job with
-how many requests were sent, answered or broken off and the tokens Anthropic reported. With systemd, put the key in an environment file that
-only root can read (`EnvironmentFile=/etc/threatsim/claude.env` holding `ANTHROPIC_API_KEY=…`). Behind
-nginx, raise `client_max_body_size` (see [Hosting](#hosting)) or larger pictures are refused.
-
 ## Run
 
 ```bash
-cd mitre-threat-sim-pro
+cd mitre-threat-sim-lite
 python3 server.py
 ```
 
 Open http://localhost:8000, sign in (`admin` / `admin` the first time) and change the password. Then
-press **Pull** on the Data page. Needs Python 3.8 or later; nothing to install. (Only the Threat
-Modelling tab's optional Claude features need more: see [Claude (optional)](#claude-optional).)
+press **Pull** on the Data page. Needs Python 3.8 or later; nothing to install.
 
 Options:
 
@@ -492,7 +244,7 @@ or later can run `server.py`; only the service and proxy set-up differ.
    `/var/lib/threatsim`, away from the code, so updating the code never touches it.
 
    ```bash
-   sudo git clone https://github.com/kaligraeme/mitre-threat-sim-pro.git /opt/threatsim
+   sudo git clone https://github.com/kaligraeme/mitre-threat-sim-lite.git /opt/threatsim
    ```
 
    ```bash
@@ -556,8 +308,6 @@ or later can run `server.py`; only the service and proxy set-up differ.
        server_name threatsim.example.com;
        ssl_certificate     /etc/letsencrypt/live/threatsim.example.com/fullchain.pem;
        ssl_certificate_key /etc/letsencrypt/live/threatsim.example.com/privkey.pem;
-
-       client_max_body_size 10m;   # pictures sent to Claude from the Threat Modelling tab
 
        location / {
            proxy_pass http://127.0.0.1:8000;
@@ -708,8 +458,8 @@ Technique (ICS) --targets--> Asset
 
 | Store | Key | Contents |
 |---|---|---|
-| `meta` | source (`nist-800-53-r5`, `kev`) | stored version, ATT&CK version it maps to, files with their URLs, pulled-at, counts |
-| `rows` | `<source>\|<domain>\|<n>` | one CTID mapping: `capabilityId` (NIST form, `AC-2`; or the CVE), name, group (control family or vulnerability type), `mappingType`, `techniqueId` and name as CTID wrote them, `comments`, `references`, `status` |
+| `meta` | source (`nist-800-53-r5`) | stored version, ATT&CK version it maps to, files with their URLs, pulled-at, counts |
+| `rows` | `<source>\|<domain>\|<n>` | one CTID mapping: `capabilityId` (NIST form, `AC-2`), name, group (control family), `mappingType`, `techniqueId` and name as CTID wrote them, `comments`, `references`, `status` |
 | `details` | `<source>\|<id>` | NIST control descriptions, as plain text |
 | `history` | auto | log of mapping pulls (shown with the MITRE pulls on the Data page) |
 

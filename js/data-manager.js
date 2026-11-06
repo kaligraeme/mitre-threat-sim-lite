@@ -1,7 +1,7 @@
 /*
  * data-manager.js — UI for checking and pulling MITRE ATT&CK and ATLAS releases into AttackDB, and the CTID
- * control and vulnerability mappings (NIST SP 800-53 Rev 5, CISA KEV) into MappingsDB. The two kinds share the
- * selection, the Pull plan and button, re-pull, history and Clear; the mappings are pulled after the knowledge bases.
+ * control mappings (NIST SP 800-53 Rev 5) into MappingsDB. The two kinds share the selection, the Pull plan and
+ * button, re-pull, history and Clear; the mappings are pulled after the knowledge bases.
  */
 (function () {
   'use strict';
@@ -56,9 +56,16 @@
     return new Set(defaults);
   }
   function saveSelected() {
+    // ids this page doesn't offer (another ThreatSim build's, saved in this browser) stay known, so that build
+    // keeps the choice made for them
+    let known = [];
+    try {
+      const v = JSON.parse(localStorage.getItem(KNOWN_KEY));
+      if (Array.isArray(v)) known = v.filter(id => typeof id === 'string');
+    } catch (_) {}
     try {
       localStorage.setItem(SELECTED_KEY, JSON.stringify([...state.selected]));
-      localStorage.setItem(KNOWN_KEY, JSON.stringify([...AttackDB.DOMAINS, ...MAPS].map(d => d.id)));
+      localStorage.setItem(KNOWN_KEY, JSON.stringify([...new Set([...known, ...[...AttackDB.DOMAINS, ...MAPS].map(d => d.id)])]));
     } catch (_) {}
   }
 
@@ -245,15 +252,14 @@
       const notes = [MDB.noteFor(s.id, meta ? meta.attackVersion : versions && versions[0].attackVersion, meta ? 'stored' : 'latest')];
       // the mappings join ATT&CK techniques by ID: without the stored knowledge base there is nothing to join
       if (!state.mapDbError && !state.meta['enterprise-attack'] && (meta || state.selected.has(s.id))) {
-        notes.push({ cls: 'warn', text: "Enterprise ATT&CK isn't stored: the mappings can be pulled, but " +
-          (s.kind === 'cves' ? 'Enterprise CVEs' : 'they') + " can't be shown until Enterprise ATT&CK is pulled." });
+        notes.push({ cls: 'warn', text: "Enterprise ATT&CK isn't stored: the mappings can be pulled, but they can't be shown until Enterprise ATT&CK is pulled." });
       }
       return sourceCard({
         id: s.id, label: s.short, title: s.title, status: mapStatus(s.id), unavailable: !!state.mapDbError,
-        stored: state.mapDbError ? 'unknown' : meta ? meta.label + ' · ' + fmtN(c.capabilities) + (s.kind === 'controls' ? ' controls' : ' CVEs') + ' mapped' : 'nothing yet',
+        stored: state.mapDbError ? 'unknown' : meta ? meta.label + ' · ' + fmtN(c.capabilities) + ' controls mapped' : 'nothing yet',
         pulled: meta ? fmtDate(meta.pulledAt) : '—',
         latest: versions ? versions[0].label : '—',
-        versions: versions && versions.map((v, i) => ({ value: v.version, text: MDB.versionLabel(s.id, v.version, true)
+        versions: versions && versions.map((v, i) => ({ value: v.version, text: MDB.versionLabel(s.id, v.version)
           + (v.stored ? ' (stored)' : i === 0 ? ' (latest)' : '') })),
         current: versions && (mapTarget(s.id) || versions[0]).version,
         notes,
@@ -353,17 +359,11 @@
     t.replaceChildren(el('thead', {}, head), el('tbody', {}, ...rows));
   }
 
-  /** Mappings with a control or CVE (meta rows from before that count was kept: all rows but the not-mappable). */
+  /** Mappings with a control (meta rows from before that count was kept: all rows but the not-mappable). */
   const mappedOf = c => (c.mapped != null ? c.mapped : (c.rows || 0) - (c.nonMappable || 0));
 
-  /** What a mapping count holds: ' (5,264 distinct)', ' (Enterprise 1,183, Mobile 45)' or ''. */
-  function mappingDetail(c) {
-    const extra = [];
-    if (c.pairs != null && c.pairs < mappedOf(c)) extra.push(fmtN(c.pairs) + ' distinct');
-    const byDomain = Object.entries(c.byDomain || {});
-    if (byDomain.length > 1) extra.push(byDomain.map(([d, n]) => domainOf(d).label + ' ' + fmtN(n)).join(', '));
-    return extra.length ? ' (' + extra.join('; ') + ')' : '';
-  }
+  /** What a mapping count holds: ' (5,264 distinct)' or ''. */
+  const mappingDetail = c => (c.pairs != null && c.pairs < mappedOf(c) ? ' (' + fmtN(c.pairs) + ' distinct)' : '');
 
   function renderMapCounts() {
     const t = $('#mappingCountsTable');
@@ -373,23 +373,23 @@
     const stored = MAPS.filter(s => state.mapMeta[s.id]);
     if (!stored.length) {
       t.replaceChildren(el('tbody', {}, el('tr', {}, el('td', { class: 'empty',
-        text: state.mapDbError ? 'The mappings database is unavailable.' : 'No control or vulnerability mappings pulled yet.' }))));
+        text: state.mapDbError ? 'The mappings database is unavailable.' : 'No control mappings pulled yet.' }))));
       return;
     }
     const dash = n => (n == null ? '—' : fmtN(n));
     t.replaceChildren(
-      el('thead', {}, el('tr', {}, ...['Dataset', 'Version', 'Control or CVE mappings', 'Controls or CVEs', 'ATT&CK techniques mapped',
+      el('thead', {}, el('tr', {}, ...['Dataset', 'Version', 'Control mappings', 'Controls', 'ATT&CK techniques mapped',
         'Techniques judged not mappable', 'Control descriptions'].map((h, i) => el('th', { class: i > 1 ? 'num' : '', text: h })))),
       el('tbody', {}, ...stored.map(s => {
         const m = state.mapMeta[s.id], c = m.counts || {};
         return el('tr', {},
           el('td', { text: s.short }),
-          el('td', { text: MDB.versionLabel(s.id, m.version, true) }),
+          el('td', { text: MDB.versionLabel(s.id, m.version) }),
           el('td', { class: 'num', text: fmtN(mappedOf(c)) + mappingDetail(c) }),
           el('td', { class: 'num', text: dash(c.capabilities) }),
           el('td', { class: 'num', text: dash(c.techniques) }),
-          el('td', { class: 'num', text: s.kind === 'controls' ? dash(c.nonMappable) : '—' }),
-          el('td', { class: 'num', text: s.kind === 'controls' ? dash(m.details) : '—' }),
+          el('td', { class: 'num', text: dash(c.nonMappable) }),
+          el('td', { class: 'num', text: dash(m.details) }),
         );
       })),
     );
@@ -660,7 +660,6 @@
 
   /** One CTID mapping source: MappingsDB downloads, checks and stores it in one transaction. */
   async function pullMapping(id) {
-    const s = mapOf(id);
     const target = mapTarget(id);
     const prog = $('#prog-' + id);
     const bar = prog.firstElementChild;
@@ -687,14 +686,13 @@
     prog.classList.remove('indeterminate');
     bar.style.width = '100%';
     const c = meta.counts;
-    const controls = s.kind === 'controls';
     // 'Stored Rev 5 · ATT&CK 16.1: 5,314 control–technique mappings (5,264 distinct) for 470 techniques across
     // 109 controls; 96 techniques judged not mappable; 118 control descriptions.'
     const plural = (n, word) => fmtN(n) + ' ' + word + (n === 1 ? '' : 's');
-    setStage('Stored ' + meta.label + ': ' + fmtN(mappedOf(c)) + (controls ? ' control–technique' : ' CVE–technique') + ' mappings'
-      + mappingDetail(c) + ' for ' + plural(c.techniques, 'technique') + ' across ' + plural(c.capabilities, controls ? 'control' : 'CVE')
+    setStage('Stored ' + meta.label + ': ' + fmtN(mappedOf(c)) + ' control–technique mappings'
+      + mappingDetail(c) + ' for ' + plural(c.techniques, 'technique') + ' across ' + plural(c.capabilities, 'control')
       + (c.nonMappable ? '; ' + plural(c.nonMappable, 'technique') + ' judged not mappable' : '')
-      + (controls ? (meta.details ? '; ' + fmtN(meta.details) + ' control descriptions' : '; control descriptions unavailable' + (meta.detailsError ? ': ' + meta.detailsError : '')) : '')
+      + (meta.details ? '; ' + fmtN(meta.details) + ' control descriptions' : '; control descriptions unavailable' + (meta.detailsError ? ': ' + meta.detailsError : ''))
       + (c.skipped ? '; ' + fmtN(c.skipped) + ' malformed entries skipped' : '') + '.', 'ok');
   }
 
@@ -732,7 +730,7 @@
 
   async function clearDb() {
     if (!confirm('Delete all locally stored data and pull history — the ATT&CK and ATLAS knowledge bases and the ' +
-      'CTID control and vulnerability mappings (NIST 800-53, KEV)?')) return;
+      'CTID control mappings (NIST 800-53)?')) return;
     const failed = [], cleared = [];
     try {
       await AttackDB.clearAll();
